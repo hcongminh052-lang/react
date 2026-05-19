@@ -8,8 +8,8 @@ from discord.ext import commands
 # --- CẤU HÌNH ---
 TOKEN = os.getenv("DISCORD_TOKEN")
 prefix = "!"
-checkpoint_file = "checkpoints_multi.json"
-channels_file = "channels.txt"
+checkpoint_file = "/app/data/checkpoints_multi.json"
+channels_file = "/app/data/channels.txt"
 
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix=prefix,
