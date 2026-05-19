@@ -41,11 +41,31 @@ def _sync_save_data(data):
         json.dump(data, f, indent=4, ensure_ascii=False)
 
 def _sync_load_channels():
+    # Đường dẫn file dự phòng từ GitHub (nằm ngoài Volume)
+    backup_file = "backup_channels.txt"
+    
+    # Nếu file channels.txt trong Volume chưa tồn tại, tạo mới nó
     if not os.path.exists(channels_file):
         with open(channels_file, "w", encoding="utf-8") as f: pass
-        return []
+
+    # Đọc thử dữ liệu hiện tại trong Volume
     with open(channels_file, "r", encoding="utf-8") as f:
-        return [int(line.strip()) for line in f if line.strip() and not line.startswith("#")]
+        channels = [int(line.strip()) for line in f if line.strip() and not line.startswith("#")]
+
+    # NẾU VOLUME TRỐNG (0 KÊNH) -> Tiến hành lấy từ file dự phòng GitHub mồi vào
+    if not channels and os.path.exists(backup_file):
+        print("💡 [HỆ THỐNG] Phát hiện Volume trống. Đang nạp 36 kênh từ file dự phòng GitHub...")
+        with open(backup_file, "r", encoding="utf-8") as f_backup:
+            backup_content = f_backup.read()
+        
+        # Ghi đè danh sách này vào file nằm trong Volume để lưu trữ vĩnh viễn
+        with open(channels_file, "w", encoding="utf-8") as f_volume:
+            f_volume.write(backup_content)
+            
+        # Đọc lại danh sách sau khi đã mồi thành công
+        channels = [int(line.strip()) for line in backup_content.split("\n") if line.strip() and not line.startswith("#")]
+
+    return channels
 
 async def save_all_data():
     data = {
