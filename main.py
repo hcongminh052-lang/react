@@ -204,6 +204,26 @@ async def total(ctx, num: int):
     print(f"♻️ Hạn mức mới: {num}")
 
 @bot.command()
+async def get_backup(ctx):
+    try:
+        # Xóa lệnh vừa gõ cho sạch kênh chat
+        try: await ctx.message.delete()
+        except: pass
+        
+        # Đường dẫn tới file checkpoint trong Volume
+        file_path = "/app/data/checkpoints_multi.json"
+        
+        if os.path.exists(file_path):
+            # Gửi file trực tiếp vào kênh chat Discord của bạn
+            await ctx.send("📦 Đây là file checkpoint mới nhất từ Railway Volume:", 
+                           file=discord.File(file_path))
+            print("✅ Đã gửi file checkpoint qua Discord thành công!")
+        else:
+            await ctx.send("❌ Không tìm thấy file checkpoint trong Volume!")
+    except Exception as e:
+        print(f"❌ Lỗi khi lấy file: {e}")
+
+@bot.command()
 async def reload(ctx):
     global TARGET_CHANNELS
     try:
