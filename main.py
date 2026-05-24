@@ -3,7 +3,6 @@ import os
 import asyncio
 import random
 import discord
-import log_handler
 import sys
 from discord.ext import commands
 
