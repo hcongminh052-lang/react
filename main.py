@@ -3,6 +3,8 @@ import os
 import asyncio
 import random
 import discord
+import log_handler
+import sys
 from discord.ext import commands
 
 # --- CẤU HÌNH ---
@@ -256,4 +258,7 @@ async def on_ready():
     bot.loop.create_task(reaction_worker())
     print(f"✅ Bot Online | Tiến độ: {current_total_reacts}/{TOTAL_REACT_LIMIT} | Đang quản lý: {len(TARGET_CHANNELS)} kênh.")
 
-bot.run(TOKEN, bot=False)
+try:
+    bot.run(TOKEN, bot=False, reconnect=True)
+except Exception as e:
+    print(f"❌ Lỗi kết nối Gateway: {e}")
