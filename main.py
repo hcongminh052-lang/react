@@ -118,7 +118,7 @@ TOTAL_REACT_LIMIT = data_store["stats"]["limit"]
 TARGET_CHANNELS = _sync_load_channels()
 
 # =====================================================================
-# ⚡ 3. HÀM SỬ LÝ REACT (GIỮ NHỊP AN TOÀN TỐI ƯU)
+# ⚡ HÀM REACT CỐT LÕI (ĐÃ TỐI ƯU TỐC ĐỘ, GIẢM TẦN SUẤT GHI Ổ CỨNG)
 # =====================================================================
 async def smart_react(msg, channel_id):
     global current_total_reacts
@@ -140,13 +140,20 @@ async def smart_react(msg, channel_id):
             await msg.add_reaction(reaction.emoji)
             current_total_reacts += 1
             print(f"[{channel_id}] ✨ Đã thả: {current_total_reacts}/{TOTAL_REACT_LIMIT}")
-            await asyncio.sleep(random.uniform(0.9, 1.5)) # Nhịp nghỉ an toàn tránh dính Rate Limit tổng
+            
+            # Tốc độ thả giữa các emoji trong cùng tin nhắn: Đẩy nhanh lên 0.4s - 0.7s (Vẫn cực kỳ an toàn)
+            await asyncio.sleep(random.uniform(0.4, 0.7)) 
         except Exception as e:
             print(f"⚠️ Lỗi thả emoji tại kênh {channel_id}: {e}")
             break
 
-    await save_all_data()
+    # 🔥 TỐI ƯU: Cứ cày được 20 quả react thì mới ghi file checkpoint một lần để giải phóng CPU/Ổ cứng
+    if current_total_reacts % 20 == 0:
+        await save_all_data()
 
+# =====================================================================
+# 📦 WORKER XỬ LÝ HÀNG ĐỢI (XÓA BỎ LỆNH NGỦ THỪA CHỐNG NGHẼN)
+# =====================================================================
 async def reaction_worker():
     while True:
         try:
@@ -155,13 +162,16 @@ async def reaction_worker():
                 await asyncio.sleep(1)
 
             if auto_react_enabled and current_total_reacts < TOTAL_REACT_LIMIT:
+                # Gọi hàm thả react
                 await smart_react(msg, msg.channel.id)
-                await asyncio.sleep(random.uniform(0.8, 1.5))
+                
+                # 🔥 ĐÃ XÓA LỆNH NGỦ THỪA Ở ĐÂY! 
+                # Bot sẽ lập tức bốc tin nhắn tiếp theo trong hàng đợi ra xử lý luôn không cần đợi tiếp.
+                
         except Exception as e:
             print(f"❌ Lỗi Worker ngầm: {e}")
         finally:
             reaction_queue.task_done()
-
 @bot.event
 async def on_message(message):
     if not auto_react_enabled or message.channel.id not in TARGET_CHANNELS:
