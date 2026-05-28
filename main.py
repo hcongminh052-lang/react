@@ -37,6 +37,11 @@ def run_flask():
             else:
                 raise e
 
+def keep_alive():
+    t = Thread(target=run_flask)
+    t.daemon = True
+    t.start()
+
 keep_alive()
 
 # =====================================================================
