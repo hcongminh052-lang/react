@@ -229,12 +229,11 @@ async def follow_old(ctx):
     is_cleaning = False
 
 # =====================================================================
-# 🔄 6. QUẢN LÝ VÒNG LẶP VÔ HẠN THEO SỰ KIỆN (THAY CHO ĐỒNG HỒ 45 PHÚT)
+# 🔄 6. BỘ QUẢN LÝ VÒNG LẶP LIÊN TỤC THÔNG MINH (CHỐNG SPAM API DISCORD)
 # =====================================================================
 async def auto_loop_manager():
     await bot.wait_until_ready()
     
-    # Lần đầu tiên mở bot, tự động kích hoạt lượt quét khai mạc luôn
     class FakeContext:
         async def delete(self): pass
     ctx = FakeContext()
@@ -242,19 +241,35 @@ async def auto_loop_manager():
     while True:
         try:
             if auto_react_enabled:
+                # Ghi lại số react trước khi đi cào bài
+                start_reacts = current_total_reacts
+                
+                # Tiến hành cào bài và đưa vào hàng đợi
                 await follow_old(ctx)
-            
-            # 🛑 Đứng đợi ở đây: Khi nào Worker thả hết sạch bài và gọi trigger_next_clean.set(),
-            # thì dòng lệnh phía dưới mới được chạy tiếp, tạo thành một vòng lặp liên tục không kẽ hở.
-            await trigger_next_clean.wait()
-            trigger_next_clean.clear() # Reset cờ hiệu về trạng thái chờ cho lượt sau
-            
-            # Nghỉ chân 5 giây ngắn ngủi giữa các lượt cào lớn để bảo vệ bot chống quá tải RAM trên Cloud
-            await asyncio.sleep(5)
-            
+                
+                # Chờ cho đến khi Worker xử lý xong sạch sẽ hàng đợi hiện tại
+                await trigger_next_clean.wait()
+                trigger_next_clean.clear() # Reset cờ hiệu
+                
+                # Tính xem trong lượt vừa rồi bot thực tế có THẢ THÀNH CÔNG quả nào không
+                reacts_gained = current_total_reacts - start_reacts
+                
+                if reacts_gained > 0:
+                    # ✅ Nếu có cày được react thật, nghỉ nhẹ 5 giây rồi quay vòng cào tiếp luôn như bạn muốn
+                    print(f"⚡ [HỆ THỐNG] Lượt vừa rồi cày được {reacts_gained} react. Nghỉ 5s rồi tiếp tục...", flush=True)
+                    await asyncio.sleep(5)
+                else:
+                    # 🛑 BẪY SPAM: Nếu gom được bài nhưng toàn emoji lỗi (hoặc không tăng react nào)
+                    # Ép bot phải NGỦ ĐÔNG 60 giây để đợi sàn có bài mới, tránh bị Discord khóa tài khoản
+                    print("⚠️ [CẢNH BÁO] Không có react nào tăng thêm (có thể dính bài lỗi hoặc hết bài mới).", flush=True)
+                    print("💤 Hệ thống tạm ngủ 60 giây để giãn cách an toàn API, chống khóa acc...", flush=True)
+                    await asyncio.sleep(60)
+            else:
+                await asyncio.sleep(5)
+                
         except Exception as e:
             print(f"❌ Lỗi luồng quản lý vòng lặp: {e}", flush=True)
-            await asyncio.sleep(10)
+            await asyncio.sleep(15)
 
 # --- CÁC LỆNH ĐIỀU KHIỂN BỔ TRỢ ---
 @bot.command()
