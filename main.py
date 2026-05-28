@@ -2,6 +2,7 @@ import json
 import os
 import asyncio
 import random
+import time
 import discord
 from discord.ext import commands
 from flask import Flask
@@ -16,7 +17,8 @@ log = logging.getLogger('werkzeug')
 log.setLevel(logging.ERROR)
 
 @app.route('/')
-def home(): return "OK", 200
+def home(): 
+    return "OK", 200
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
@@ -42,15 +44,16 @@ backup_file = "backup_channels.txt"
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix=prefix, help_command=None, intents=intents, self_bot=True)
 
-TOTAL_REACT_LIMIT = 50000
+TOTAL_REACT_LIMIT = 999999
 current_total_reacts = 0
 auto_react_enabled = True
 reaction_queue = asyncio.Queue()
 is_cleaning = False
 channel_checkpoints = {}
 
-# 🔥 CỜ HIỆU THÔNG MINH: Dùng để ra lệnh cho bot đi cào bài mới ngay lập tức
+# Hệ thống cờ hiệu và bộ lọc cách ly kênh lỗi
 trigger_next_clean = asyncio.Event()
+failed_channels_pool = {}  # Cấu trúc: {channel_id: {"count": số_lần_lỗi, "timeout": thời_gian_bị_chặn}}
 
 def _sync_load_data():
     default_data = {"stats": {"current_total": 0, "limit": TOTAL_REACT_LIMIT}}
@@ -60,7 +63,8 @@ def _sync_load_data():
                 data = json.load(f)
                 if "stats" not in data: data["stats"] = default_data["stats"]
                 return data
-        except: return default_data
+        except: 
+            return default_data
     return default_data
 
 def _sync_save_data(data):
@@ -68,7 +72,8 @@ def _sync_save_data(data):
         os.makedirs(os.path.dirname(checkpoint_file), exist_ok=True)
         with open(checkpoint_file, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=4, ensure_ascii=False)
-    except Exception as e: print(f"❌ Lỗi ghi file checkpoint: {e}", flush=True)
+    except Exception as e: 
+        print(f"❌ Lỗi ghi file checkpoint: {e}", flush=True)
 
 def _sync_load_channels():
     os.makedirs(os.path.dirname(channels_file), exist_ok=True)
@@ -77,8 +82,10 @@ def _sync_load_channels():
     with open(channels_file, "r", encoding="utf-8") as f:
         channels = [int(line.strip()) for line in f if line.strip() and not line.startswith("#")]
     if not channels and os.path.exists(backup_file):
-        with open(backup_file, "r", encoding="utf-8") as f_backup: backup_content = f_backup.read()
-        with open(channels_file, "w", encoding="utf-8") as f_volume: f_volume.write(backup_content)
+        with open(backup_file, "r", encoding="utf-8") as f_backup: 
+            backup_content = f_backup.read()
+        with open(channels_file, "w", encoding="utf-8") as f_volume: 
+            f_volume.write(backup_content)
         channels = [int(line.strip()) for line in backup_content.split("\n") if line.strip() and not line.startswith("#")]
     return channels
 
@@ -92,7 +99,7 @@ TOTAL_REACT_LIMIT = data_store["stats"]["limit"]
 TARGET_CHANNELS = _sync_load_channels()
 
 # =====================================================================
-# ⚡ 3. HÀM THẢ REACT TỐC ĐỘ CAO (AN TOÀN + BỎ QUA EMOJI LỖI 10014)
+# ⚡ 3. HÀM THẢ REACT SIÊU TỐC VÀ ĐÁNH ĐIỂM PHẠT KÊNH LỖI
 # =====================================================================
 async def smart_react(msg, channel_id):
     global current_total_reacts
@@ -114,11 +121,23 @@ async def smart_react(msg, channel_id):
             await msg.add_reaction(reaction.emoji)
             current_total_reacts += 1
             print(f"[{channel_id}] ✨ Đã thả: {current_total_reacts}/{TOTAL_REACT_LIMIT}", flush=True)
-            await asyncio.sleep(random.uniform(0.25, 0.5)) # Tốc độ cực nhanh cực mượt
+            await asyncio.sleep(random.uniform(0.25, 0.5)) 
         except discord.errors.HTTPException as e:
             if e.code == 10014:
                 print(f"⚠️ Bỏ qua emoji lỗi 10014 tại kênh {channel_id}", flush=True)
-                continue # Nhảy sang quả tiếp theo, không phá luồng
+                
+                # Tăng điểm phạt cho kênh này
+                if channel_id not in failed_channels_pool:
+                    failed_channels_pool[channel_id] = {"count": 1, "timeout": 0}
+                else:
+                    failed_channels_pool[channel_id]["count"] += 1
+                    
+                # Nếu dính lỗi chạm mốc 2 lần, đưa vào danh sách đen cách ly trong 30 phút (1800 giây)
+                if failed_channels_pool[channel_id]["count"] >= 2:
+                    failed_channels_pool[channel_id]["timeout"] = time.time() + 1800
+                    print(f"🚫 [DANH SÁCH ĐEN] Kênh {channel_id} lỗi liên tiếp 2 lần. Khóa quét kênh này trong 30 phút!", flush=True)
+                
+                continue 
             else:
                 continue
         except Exception as e:
@@ -128,12 +147,11 @@ async def smart_react(msg, channel_id):
         await save_all_data()
 
 # =====================================================================
-# 📦 4. WORKER NGẦM & BẮN TÍN HIỆU LẶP LẠI NGAY KHI HẾT BÀI
+# 📦 4. WORKER NGẦM XỬ LÝ HÀNG ĐỢI & KÍCH HOẠT QUAY VÒNG QUÉT
 # =====================================================================
 async def reaction_worker():
     while True:
         try:
-            # Lấy tin nhắn từ hàng đợi ra xử lý
             msg = await reaction_queue.get()
             while is_cleaning:
                 await asyncio.sleep(0.5)
@@ -146,14 +164,13 @@ async def reaction_worker():
         finally:
             reaction_queue.task_done()
             
-            # 🔥 ĐÂY LÀ KHÚC PHÁT TÍN HIỆU LẶP LẠI:
-            # Nếu hàng đợi trống rỗng hoàn toàn, kích hoạt cờ hiệu để ép bot đi cào bài tiếp ngay lập tức!
+            # Nếu xử lý xong sạch sẽ rổ bài cũ, ra lệnh đi cào tập bài mới ngay lập tức
             if reaction_queue.empty() and not is_cleaning and auto_react_enabled:
                 print("🏁 [HÀNG ĐỢI TRỐNG] Đã xả hết sạch bài cũ! Đang kích hoạt vòng quét mới ngay lập tức...", flush=True)
                 trigger_next_clean.set()
 
 # =====================================================================
-# 🧹 5. CÀO BÀI DIỆN RỘNG (MỤC TIÊU LỚN KHÔNG DÙNG CHECKPOINT CŨ)
+# 🧹 5. CÀO BÀI DIỆN RỘNG CHỦ ĐỘNG NÉ KÊNH ĐANG BỊ PHẠT LOCK
 # =====================================================================
 @bot.command(aliases=["clean"])
 async def follow_old(ctx):
@@ -165,8 +182,8 @@ async def follow_old(ctx):
     is_cleaning = True
     print(f"🧹 [HỆ THỐNG] Đang tiến hành cào bài tham lam diện rộng...", flush=True)
 
-    TARGET_PER_CHANNEL = 35   # Lấy tối đa 35 bài có emoji mỗi kênh
-    MAX_LOOKBACK = 250        # Lội ngược sâu tối đa 250 bài mỗi kênh để tìm tin nhắn chất lượng
+    TARGET_PER_CHANNEL = 35   
+    MAX_LOOKBACK = 250        
     global_temp_list = []
 
     shuffled_channels = TARGET_CHANNELS.copy()
@@ -175,6 +192,15 @@ async def follow_old(ctx):
     for cid in shuffled_channels:
         if current_total_reacts >= TOTAL_REACT_LIMIT:
             break
+
+        # KIỂM TRA PHẠT LOCK: Check xem kênh có đang bị cách ly 30 phút không
+        if cid in failed_channels_pool:
+            if time.time() < failed_channels_pool[cid]["timeout"]:
+                # Vẫn đang trong thời gian chịu phạt -> Bỏ qua luôn để nhảy sang kênh khác
+                continue
+            else:
+                # Đã hết hạn 30 phút thử thách -> Xóa án tích để cho kênh cơ hội thử lại
+                failed_channels_pool.pop(cid, None)
 
         channel = bot.get_channel(cid)
         if not channel: continue
@@ -185,17 +211,18 @@ async def follow_old(ctx):
 
         while channel_gathered < TARGET_PER_CHANNEL and total_scanned < MAX_LOOKBACK:
             args = {"limit": 50}
-            
-            # Bỏ qua checkpoint khi chạy tự động để luôn lội ngược dòng từ tin mới nhất trở xuống
             if oldest_msg_id:
                 args["before"] = discord.Object(id=oldest_msg_id)
 
             history_chunk = []
             try:
-                async for msg in channel.history(**args): history_chunk.append(msg)
-            except: break
+                async for msg in channel.history(**args): 
+                    history_chunk.append(msg)
+            except: 
+                break
 
-            if not history_chunk: break
+            if not history_chunk: 
+                break
 
             oldest_msg_id = history_chunk[-1].id
             total_scanned += len(history_chunk)
@@ -208,7 +235,8 @@ async def follow_old(ctx):
                     if missing_reactions:
                         global_temp_list.append(msg)
                         channel_gathered += 1
-                        if channel_gathered >= TARGET_PER_CHANNEL: break
+                        if channel_gathered >= TARGET_PER_CHANNEL: 
+                            break
             del history_chunk
 
     if global_temp_list:
@@ -221,7 +249,6 @@ async def follow_old(ctx):
         print(f"📦 Đã phân bổ xong {len(global_temp_list)} tin vào hàng đợi xử lý tốc độ cao.", flush=True)
         del global_temp_list
     else:
-        # Nếu xui xẻo không gom được tin nào, cho nghỉ 30 giây rồi tự kích hoạt lại để tránh thắt nút cổ chai
         print("ℹ️ Không tìm thấy tin nhắn mới nào phù hợp. Sẽ thử lại sau 30 giây...", flush=True)
         await asyncio.sleep(30)
         trigger_next_clean.set()
@@ -229,7 +256,7 @@ async def follow_old(ctx):
     is_cleaning = False
 
 # =====================================================================
-# 🔄 6. BỘ QUẢN LÝ VÒNG LẶP LIÊN TỤC THÔNG MINH (CHỐNG SPAM API DISCORD)
+# 🔄 6. BỘ QUẢN LÝ VÒNG LẶP LIÊN TỤC THÔNG MINH AN TOÀN
 # =====================================================================
 async def auto_loop_manager():
     await bot.wait_until_ready()
@@ -241,28 +268,25 @@ async def auto_loop_manager():
     while True:
         try:
             if auto_react_enabled:
-                # Ghi lại số react trước khi đi cào bài
                 start_reacts = current_total_reacts
                 
-                # Tiến hành cào bài và đưa vào hàng đợi
+                # Bắt đầu cào bài
                 await follow_old(ctx)
                 
-                # Chờ cho đến khi Worker xử lý xong sạch sẽ hàng đợi hiện tại
+                # Treo máy đợi Worker ngầm xả hết đống bài vừa cào
                 await trigger_next_clean.wait()
-                trigger_next_clean.clear() # Reset cờ hiệu
+                trigger_next_clean.clear() 
                 
-                # Tính xem trong lượt vừa rồi bot thực tế có THẢ THÀNH CÔNG quả nào không
                 reacts_gained = current_total_reacts - start_reacts
                 
                 if reacts_gained > 0:
-                    # ✅ Nếu có cày được react thật, nghỉ nhẹ 5 giây rồi quay vòng cào tiếp luôn như bạn muốn
-                    print(f"⚡ [HỆ THỐNG] Lượt vừa rồi cày được {reacts_gained} react. Nghỉ 5s rồi tiếp tục...", flush=True)
+                    # Nếu lượt vừa rồi cày thành công, nghỉ 5 giây rồi lặp lại ngay lập tức
+                    print(f"⚡ [HỆ THỐNG] Lượt vừa rồi cày được {reacts_gained} react. Quay vòng cào tiếp sau 5s...", flush=True)
                     await asyncio.sleep(5)
                 else:
-                    # 🛑 BẪY SPAM: Nếu gom được bài nhưng toàn emoji lỗi (hoặc không tăng react nào)
-                    # Ép bot phải NGỦ ĐÔNG 60 giây để đợi sàn có bài mới, tránh bị Discord khóa tài khoản
-                    print("⚠️ [CẢNH BÁO] Không có react nào tăng thêm (có thể dính bài lỗi hoặc hết bài mới).", flush=True)
-                    print("💤 Hệ thống tạm ngủ 60 giây để giãn cách an toàn API, chống khóa acc...", flush=True)
+                    # Nếu không tăng quả nào (toàn dính emoji lỗi hoặc hết bài), cho bot ngủ đông 60s để tránh spam API
+                    print("⚠️ [CẢNH BÁO] Không có react nào tăng thêm (dính bài lỗi hoặc hết bài mới).", flush=True)
+                    print("💤 Hệ thống tạm ngủ 60 giây để giãn cách an toàn API, chờ bài mới phát sinh...", flush=True)
                     await asyncio.sleep(60)
             else:
                 await asyncio.sleep(5)
@@ -283,7 +307,7 @@ async def total(ctx, num: int):
 async def start(ctx):
     global auto_react_enabled
     auto_react_enabled = True
-    trigger_next_clean.set() # Bật lại là ép cào luôn
+    trigger_next_clean.set()
     print("▶️ BẬT AUTO REACT", flush=True)
 
 @bot.command()
@@ -293,10 +317,19 @@ async def stop(ctx):
     await save_all_data()
     print("⛔ DỪNG AUTO REACT", flush=True)
 
+@bot.command()
+async def reload(ctx):
+    global TARGET_CHANNELS
+    try:
+        TARGET_CHANNELS = await asyncio.to_thread(_sync_load_channels)
+        print(f"🔄 ĐÃ CẬP NHẬT: Hiện có {len(TARGET_CHANNELS)} kênh.", flush=True)
+    except Exception as e:
+        print(f"❌ Lỗi reload danh sách kênh: {e}", flush=True)
+
 @bot.event
 async def on_ready():
     bot.loop.create_task(reaction_worker())
-    bot.loop.create_task(auto_loop_manager()) # Kích hoạt bộ quản lý vòng lặp theo sự kiện
+    bot.loop.create_task(auto_loop_manager())
     print(f"✅ Bot Online (Môi trường Railway Cloud) | Tiến độ: {current_total_reacts}/{TOTAL_REACT_LIMIT}", flush=True)
 
 try:
