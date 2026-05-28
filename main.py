@@ -46,14 +46,17 @@ bot = commands.Bot(command_prefix=prefix, help_command=None, intents=intents, se
 
 TOTAL_REACT_LIMIT = 999999
 current_total_reacts = 0
-auto_react_enabled = True
+auto_react_enabled = False # Mặc định để False, gõ !start mới kích hoạt luồng
 reaction_queue = asyncio.Queue()
 is_cleaning = False
-channel_checkpoints = {}  # Lưu trữ checkpoint từng kênh vào file JSON
+channel_checkpoints = {}  
 
-# Hệ thống cờ hiệu và bộ lọc cách ly kênh lỗi
 trigger_next_clean = asyncio.Event()
 failed_channels_pool = {}  
+
+# 🔥 BIẾN QUẢN LÝ LUỒNG NGẦM ĐỂ CÓ THỂ CANCEL ĐƯỢC
+loop_manager_task = None
+worker_task = None
 
 def _sync_load_data():
     default_data = {"stats": {"current_total": 0, "limit": TOTAL_REACT_LIMIT}, "checkpoints": {}}
@@ -93,11 +96,10 @@ def _sync_load_channels():
 async def save_all_data():
     data = {
         "stats": {"current_total": current_total_reacts, "limit": TOTAL_REACT_LIMIT},
-        "checkpoints": channel_checkpoints # Lưu kèm cả vết cào bài của từng kênh
+        "checkpoints": channel_checkpoints 
     }
     await asyncio.to_thread(_sync_save_data, data)
 
-# Khởi tạo nạp dữ liệu ban đầu từ ổ cứng Railway
 data_store = _sync_load_data()
 current_total_reacts = data_store["stats"]["current_total"]
 TOTAL_REACT_LIMIT = data_store["stats"]["limit"]
@@ -150,11 +152,11 @@ async def smart_react(msg, channel_id):
         await save_all_data()
 
 # =====================================================================
-# 📦 4. WORKER NGẦM XỬ LÝ HÀNG ĐỢI & KÍCH HOẠT QUAY VÒNG QUÉT
+# 📦 4. WORKER NGẦM XỬ LÝ HÀNG ĐỢI
 # =====================================================================
 async def reaction_worker():
-    while True:
-        try:
+    try:
+        while True:
             msg = await reaction_queue.get()
             while is_cleaning:
                 await asyncio.sleep(0.5)
@@ -162,37 +164,33 @@ async def reaction_worker():
             if auto_react_enabled and current_total_reacts < TOTAL_REACT_LIMIT:
                 await smart_react(msg, msg.channel.id)
                 
-        except Exception as e:
-            print(f"❌ Lỗi Worker ngầm: {e}", flush=True)
-        finally:
             reaction_queue.task_done()
             
             if reaction_queue.empty() and not is_cleaning and auto_react_enabled:
-                print("🏁 [HÀNG ĐỢI TRỐNG] Đã xả hết sạch bài cũ! Đang kích hoạt vòng quét mới ngay lập tức...", flush=True)
+                print("🏁 [HÀNG ĐỢI TRỐNG] Đã xả hết sạch bài cũ! Kích hoạt vòng quét mới...", flush=True)
                 trigger_next_clean.set()
+    except asyncio.CancelledError:
+        print("📥 [WORKER] Luồng xử lý hàng đợi thả react đã bị hủy hoàn toàn.", flush=True)
 
 # =====================================================================
-# 🧹 5. ĐÀO LẠI BÀI CŨ DỰA TRÊN VẾT CHECKPOINT (TỐI ƯU TỐC ĐỘ CÀO)
+# 🧹 5. ĐÀO LẠI BÀI CŨ DỰA TRÊN VẾT CHECKPOINT
 # =====================================================================
-@bot.command(aliases=["clean"])
-async def follow_old(ctx):
+async def follow_old_logic():
     global is_cleaning, channel_checkpoints
-    try: await ctx.message.delete()
-    except: pass
     if not auto_react_enabled: return
 
     is_cleaning = True
-    print(f"🧹 [HỆ THỐNG] Đang sử dụng Checkpoint tiến hành ĐÀO SÂU bài cũ về quá khứ...", flush=True)
+    print(f"🧹 [HỆ THỐNG] Đang sử dụng Checkpoint tiến hành ĐÀO SÂU bài cũ...", flush=True)
 
-    TARGET_PER_CHANNEL = 35   # Lấy tối đa 35 bài chất lượng mỗi kênh trong lượt này
-    MAX_LOOKBACK = 400        # Cho phép lội sâu tối đa 400 tin mỗi lượt để đào mỏ cũ
+    TARGET_PER_CHANNEL = 35   
+    MAX_LOOKBACK = 400        
     global_temp_list = []
 
     shuffled_channels = TARGET_CHANNELS.copy()
     random.shuffle(shuffled_channels)
 
     for cid in shuffled_channels:
-        if current_total_reacts >= TOTAL_REACT_LIMIT:
+        if current_total_reacts >= TOTAL_REACT_LIMIT or not auto_react_enabled:
             break
 
         if cid in failed_channels_pool:
@@ -207,15 +205,12 @@ async def follow_old(ctx):
         channel_gathered = 0
         total_scanned = 0
         
-        # 🔥 ĐỌC VẾT CHECKPOINT CŨ CỦA KÊNH NÀY TỪ FILE
         oldest_msg_id = channel_checkpoints.get(str(cid), {}).get("last_id")
         if oldest_msg_id:
             oldest_msg_id = int(oldest_msg_id)
 
-        while channel_gathered < TARGET_PER_CHANNEL and total_scanned < MAX_LOOKBACK:
-            args = {"limit": 100} # Đẩy limit lên 100 tin mỗi lần cào để lội cực nhanh
-            
-            # Nếu đã có vết checkpoint, bot nhảy cóc thẳng xuống tin nhắn cũ đó để cào tiếp xuống
+        while channel_gathered < TARGET_PER_CHANNEL and total_scanned < MAX_LOOKBACK and auto_react_enabled:
+            args = {"limit": 100} 
             if oldest_msg_id:
                 args["before"] = discord.Object(id=oldest_msg_id)
 
@@ -223,17 +218,14 @@ async def follow_old(ctx):
             try:
                 async for msg in channel.history(**args): 
                     history_chunk.append(msg)
-            except Exception as e: 
-                print(f"⚠️ Không thể đọc lịch sử kênh {cid}: {e}", flush=True)
+            except: 
                 break
 
-            # Nếu không còn tin nhắn nào nữa (Đã đào cạn sạch lịch sử của kênh này)
             if not history_chunk: 
-                print(f"ℹ️ Kênh {cid} đã bị đào cạn sạch lịch sử về quá khứ. Reset mốc quét về đỉnh!", flush=True)
-                channel_checkpoints.pop(str(cid), None) # Xóa mốc cũ để lượt sau cào lại từ tin mới nhất
+                print(f"ℹ️ Kênh {cid} đã bị đào cạn sạch lịch sử. Reset về đỉnh!", flush=True)
+                channel_checkpoints.pop(str(cid), None) 
                 break
 
-            # Cập nhật điểm cũ nhất vừa chạm tới
             oldest_msg_id = history_chunk[-1].id
             total_scanned += len(history_chunk)
 
@@ -249,45 +241,42 @@ async def follow_old(ctx):
                             break
             del history_chunk
 
-        # 🔥 LƯU LẠI VẾT CHECKPOINT MỚI NHẤT VỪA ĐÀO ĐƯỢC CỦA KÊNH NÀY
-        if oldest_msg_id:
+        if oldest_msg_id and auto_react_enabled:
             channel_checkpoints[str(cid)] = {"last_id": str(oldest_msg_id)}
 
-    # Sau khi duyệt qua các kênh, tiến hành lưu lại toàn bộ mốc checkpoint lên ổ cứng Railway
     await save_all_data()
 
-    if global_temp_list:
-        print(f"🔄 Gom thành công {len(global_temp_list)} tin nhắn cũ hợp lệ từ mỏ checkpoint. Tiến hành trộn phẳng...", flush=True)
+    if global_temp_list and auto_react_enabled:
+        print(f"🔄 Gom thành công {len(global_temp_list)} tin nhắn cũ từ checkpoint. Trộn phẳng...", flush=True)
         random.shuffle(global_temp_list)
-        random.shuffle(global_temp_list)
-
         for msg in global_temp_list:
             await reaction_queue.put(msg)
-        print(f"📦 Đã phân bổ xong {len(global_temp_list)} tin vào hàng đợi xử lý tốc độ cao.", flush=True)
         del global_temp_list
     else:
-        print("ℹ️ Mỏ cũ tạm thời chưa đào thêm được bài nào hợp lệ. Sẽ thử lại sau 20 giây...", flush=True)
-        await asyncio.sleep(20)
-        trigger_next_clean.set()
+        if auto_react_enabled:
+            print("ℹ️ Mỏ cũ chưa đào thêm được bài hợp lệ. Thử lại sau 20 giây...", flush=True)
+            await asyncio.sleep(20)
+            trigger_next_clean.set()
 
     is_cleaning = False
 
+@bot.command(aliases=["clean"])
+async def follow_old(ctx):
+    try: await ctx.message.delete()
+    except: pass
+    if auto_react_enabled:
+        await follow_old_logic()
+
 # =====================================================================
-# 🔄 6. BỘ QUẢN LÝ VÒNG LẶP LIÊN TỤC THÔNG MINH AN TOÀN
+# 🔄 6. BỘ QUẢN LÝ VÒNG LẶP LIÊN TỤC THEO TASK RIÊNG
 # =====================================================================
 async def auto_loop_manager():
-    await bot.wait_until_ready()
-    
-    class FakeContext:
-        async def delete(self): pass
-    ctx = FakeContext()
-    
-    while True:
-        try:
+    try:
+        while True:
             if auto_react_enabled:
                 start_reacts = current_total_reacts
                 
-                await follow_old(ctx)
+                await follow_old_logic()
                 
                 await trigger_next_clean.wait()
                 trigger_next_clean.clear() 
@@ -295,40 +284,79 @@ async def auto_loop_manager():
                 reacts_gained = current_total_reacts - start_reacts
                 
                 if reacts_gained > 0:
-                    print(f"⚡ [HỆ THỐNG] Lượt vừa rồi cày được {reacts_gained} react. Đào tiếp vết cũ sau 5s...", flush=True)
+                    print(f"⚡ [HỆ THỐNG] Lượt vừa rồi cày được {reacts_gained} react. Đào tiếp sau 5s...", flush=True)
                     await asyncio.sleep(5)
                 else:
-                    print("⚠️ [THÔNG BÁO] Lượt đào này không phát sinh thêm react nào mới.", flush=True)
-                    print("💤 Hệ thống nghỉ 30 giây để giãn cách an toàn API trước khi đào sâu tiếp...", flush=True)
+                    print("💤 Hệ thống nghỉ 30 giây để giãn cách an toàn API trước khi đào tiếp...", flush=True)
                     await asyncio.sleep(30)
             else:
-                await asyncio.sleep(5)
-                
-        except Exception as e:
-            print(f"❌ Lỗi luồng quản lý vòng lặp: {e}", flush=True)
-            await asyncio.sleep(15)
+                await asyncio.sleep(1)
+    except asyncio.CancelledError:
+        print("🔄 [LOOP MANAGER] Luồng quản lý vòng lặp cào bài tự động đã bị đóng hoàn toàn.", flush=True)
 
-# --- CÁC LỆNH ĐIỀU KHIỂN BỔ TRỢ ---
+# --- 🔥 HỆ THỐNG LỆNH ĐIỀU KHIỂN START / STOP TUYỆT ĐỐI ---
+@bot.command()
+async def start(ctx):
+    try: await ctx.message.delete()
+    except: pass
+    global auto_react_enabled, loop_manager_task, worker_task
+    
+    if auto_react_enabled:
+        print("⚠️ Hệ thống Auto React vốn đã đang chạy rồi!", flush=True)
+        return
+
+    auto_react_enabled = True
+    print("▶️ [KÍCH HOẠT] ĐANG BẬT LUỒNG HỆ THỐNG AUTO REACT...", flush=True)
+    
+    # Dọn dẹp hàng đợi cũ nếu còn sót lại trước khi chạy luồng mới
+    while not reaction_queue.empty():
+        try: reaction_queue.get_nowait()
+        except: break
+
+    # Sinh ra 2 Task ngầm độc lập hoàn toàn để quản lý luồng
+    worker_task = bot.loop.create_task(reaction_worker())
+    loop_manager_task = bot.loop.create_task(auto_loop_manager())
+    
+    # Ép kích hoạt lượt quét khai mạc luôn
+    trigger_next_clean.set()
+
+@bot.command()
+async def stop(ctx):
+    try: await ctx.message.delete()
+    except: pass
+    global auto_react_enabled, loop_manager_task, worker_task, is_cleaning
+    
+    if not auto_react_enabled:
+        print("⚠️ Hệ thống hiện đang tắt, không cần dừng!", flush=True)
+        return
+
+    auto_react_enabled = False
+    is_cleaning = False
+    print("⛔ [DỪNG KHẨN CẤP] ĐANG KHAI TỬ TOÀN BỘ LUỒNG AUTO REACT VÀ WORKER...", flush=True)
+    
+    # 💥 KHAI TỬ THẲNG TAY LUỒNG QUẢN LÝ VÒNG LẶP VÀ WORKER
+    if loop_manager_task and not loop_manager_task.done():
+        loop_manager_task.cancel()
+    if worker_task and not worker_task.done():
+        worker_task.cancel()
+        
+    loop_manager_task = None
+    worker_task = None
+
+    # Làm trống rổ hàng đợi ngay lập tức để giải phóng tài nguyên
+    while not reaction_queue.empty():
+        try: reaction_queue.get_nowait()
+        except: break
+
+    await save_all_data()
+    print("✅ Đã đưa hệ thống về trạng thái ĐÓNG BĂNG HOÀN TOÀN thành công.", flush=True)
+
 @bot.command()
 async def total(ctx, num: int):
     global TOTAL_REACT_LIMIT
     TOTAL_REACT_LIMIT = num
     await save_all_data()
     print(f"♻️ Hạn mức mới: {num}", flush=True)
-
-@bot.command()
-async def start(ctx):
-    global auto_react_enabled
-    auto_react_enabled = True
-    trigger_next_clean.set()
-    print("▶️ BẬT AUTO REACT", flush=True)
-
-@bot.command()
-async def stop(ctx):
-    global auto_react_enabled
-    auto_react_enabled = False
-    await save_all_data()
-    print("⛔ DỪNG AUTO REACT", flush=True)
 
 @bot.command()
 async def reload(ctx):
@@ -341,9 +369,13 @@ async def reload(ctx):
 
 @bot.event
 async def on_ready():
-    bot.loop.create_task(reaction_worker())
-    bot.loop.create_task(auto_loop_manager())
-    print(f"✅ Bot Online (Môi trường Railway Cloud) | Tiến độ: {current_total_reacts}/{TOTAL_REACT_LIMIT}", flush=True)
+    print(f"✅ Bot Online (Môi trường Railway Cloud) | Tiến độ hiện tại: {current_total_reacts}/{TOTAL_REACT_LIMIT}", flush=True)
+    print(f"💡 Sử dụng lệnh !start để bắt đầu luồng cày và !stop để dừng khẩn cấp.", flush=True)
+
+# =====================================================================
+# 🚀 KHỞI CHẠY
+# =====================================================================
+keep_alive()
 
 try:
     bot.run(TOKEN, bot=False, reconnect=True)
