@@ -118,7 +118,7 @@ TOTAL_REACT_LIMIT = data_store["stats"]["limit"]
 TARGET_CHANNELS = _sync_load_channels()
 
 # =====================================================================
-# ⚡ HÀM REACT CỐT LÕI (ĐÃ TỐI ƯU TỐC ĐỘ, GIẢM TẦN SUẤT GHI Ổ CỨNG)
+# ⚡ HÀM REACT SIÊU TỐC (ÉP TIẾN ĐỘ CHẠY ĐỦ NHANH)
 # =====================================================================
 async def smart_react(msg, channel_id):
     global current_total_reacts
@@ -139,16 +139,17 @@ async def smart_react(msg, channel_id):
         try:
             await msg.add_reaction(reaction.emoji)
             current_total_reacts += 1
-            print(f"[{channel_id}] ✨ Đã thả: {current_total_reacts}/{TOTAL_REACT_LIMIT}")
+            print(f"[{channel_id}] ✨ Đã thả: {current_total_reacts}/{TOTAL_REACT_LIMIT}", flush=True)
             
-            # Tốc độ thả giữa các emoji trong cùng tin nhắn: Đẩy nhanh lên 0.4s - 0.7s (Vẫn cực kỳ an toàn)
-            await asyncio.sleep(random.uniform(0.4, 0.7)) 
+            # 🔥 ĐẨY TỐC ĐỘ LÊN CỰC ĐẠI: Chỉ nghỉ từ 0.25s đến 0.5s giữa các quả emoji
+            # Tốc độ này tương đương ~150 - 200 react / phút, cực nhanh nhưng không bị gậy Rate Limit tổng
+            await asyncio.sleep(random.uniform(0.25, 0.5)) 
         except Exception as e:
-            print(f"⚠️ Lỗi thả emoji tại kênh {channel_id}: {e}")
+            print(f"⚠️ Lỗi thả emoji tại kênh {channel_id}: {e}", flush=True)
             break
 
-    # 🔥 TỐI ƯU: Cứ cày được 20 quả react thì mới ghi file checkpoint một lần để giải phóng CPU/Ổ cứng
-    if current_total_reacts % 20 == 0:
+    # Cứ cày được 30 quả thì lưu checkpoint một lần để tránh nghẽn ổ cứng
+    if current_total_reacts % 30 == 0:
         await save_all_data()
 
 # =====================================================================
@@ -191,7 +192,7 @@ async def on_message(message):
     await bot.process_commands(message)
 
 # =====================================================================
-# 🧹 4. LỆNH DEEP SCAN CUỐN CHIẾU + TRỘN PHẲNG TOÀN DIỆN (CHỐNG RATE LIMIT KÊNH)
+# 🧹 LỆNH CÀO BÀI THAM LAM (GOM ÍT NHẤT 200 - 500 TIN MỖI LƯỢT CHẠY)
 # =====================================================================
 @bot.command(aliases=["clean"])
 async def follow_old(ctx):
@@ -201,13 +202,13 @@ async def follow_old(ctx):
     if not auto_react_enabled: return
 
     is_cleaning = True
-    print(f"🧹 [HỆ THỐNG] Tiến hành gom bài cuốn chiếu (Tối ưu RAM & Chống nghẽn Railway)...")
+    print(f"🧹 [HỆ THỐNG] Đang cào bài tham lam diện rộng (Mục tiêu >200 tin)...", flush=True)
 
-    TARGET_PER_CHANNEL = 40   # Lấy tối đa 40 tin có react mỗi kênh
-    MAX_LOOKBACK = 500        # Giới hạn lội ngược dòng tránh quá tải luồng
-    global_temp_list = []     # Rổ lớn chứa bộ nhớ tạm
+    # 🔥 CẤU HÌNH THAM LAM:
+    TARGET_PER_CHANNEL = 35   # Lấy tối đa 35 tin có emoji trên MỖI KÊNH
+    MAX_LOOKBACK = 250        # Lội ngược dòng sâu tối đa 250 tin mỗi kênh để tìm bài
+    global_temp_list = []
 
-    # Xáo trộn danh sách kênh đầu vào để tăng độ phân tán
     shuffled_channels = TARGET_CHANNELS.copy()
     random.shuffle(shuffled_channels)
 
@@ -224,15 +225,23 @@ async def follow_old(ctx):
 
         while channel_gathered < TARGET_PER_CHANNEL and total_scanned < MAX_LOOKBACK:
             args = {"limit": 50}
+            
+            # 🔥 THAY ĐỔI QUAN TRỌNG: 
+            # Nếu là vòng lặp tự động (ctx không có tin nhắn thật), ta BỎ QUA last_id của checkpoint cũ.
+            # Điều này ép bot luôn luôn quét từ các bài MỚI NHẤT hiện tại trở xuống để nhặt được nhiều tin nhất.
             if oldest_msg_id:
                 args["before"] = discord.Object(id=oldest_msg_id)
+            elif ctx and hasattr(ctx, 'message') and ctx.message:
+                # Nếu bạn gõ lệnh gõ tay !clean, bot vẫn có thể dùng checkpoint nếu muốn
+                last_id = channel_checkpoints.get(str(cid), {}).get("last_id")
+                if last_id: args["before"] = discord.Object(id=int(last_id))
 
             history_chunk = []
             try:
                 async for msg in channel.history(**args):
                     history_chunk.append(msg)
             except Exception as e:
-                print(f"❌ Lỗi đọc lịch sử kênh {cid}: {e}")
+                print(f"❌ Lỗi đọc lịch sử kênh {cid}: {e}", flush=True)
                 break
 
             if not history_chunk:
@@ -252,22 +261,26 @@ async def follow_old(ctx):
                         if channel_gathered >= TARGET_PER_CHANNEL:
                             break
             
-            del history_chunk # Xóa ngay vùng đệm dữ liệu thừa
+            del history_chunk
 
-    # 🔥 THUẬT TOÁN QUAN TRỌNG: Trộn phẳng rổ lớn 2 lần để bẻ gãy cụm tin nhắn trùng kênh
+        # Ghi nhận điểm dừng cho lệnh gõ tay
+        if oldest_msg_id:
+            channel_checkpoints[str(cid)] = {"last_id": str(oldest_msg_id)}
+
+    # Trộn phẳng ngẫu nhiên để các kênh xen kẽ nhau (Phá cụm Rate Limit cục bộ của Discord)
     if global_temp_list:
-        print(f"🔄 Gom thành công {len(global_temp_list)} tin. Tiến hành trộn phẳng chống trùng kênh...")
+        print(f"🔄 Gom thành công {len(global_temp_list)} tin nhắn. Tiến hành trộn phẳng...", flush=True)
         random.shuffle(global_temp_list)
         random.shuffle(global_temp_list)
 
         for msg in global_temp_list:
             await reaction_queue.put(msg)
         
-        print(f"📦 Đã phân bổ xong {len(global_temp_list)} tin nhắn vào hàng đợi.")
-        del global_temp_list # Giải phóng rổ lớn hoàn toàn
+        print(f"📦 Đã phân bổ xong {len(global_temp_list)} tin vào hàng đợi xử lý tốc độ cao.", flush=True)
+        del global_temp_list
 
     is_cleaning = False
-    print(f"🏁 [HỆ THỐNG] Quá trình phân bổ hoàn tất! Worker đang chạy ngầm...")
+    print(f"🏁 [HỆ THỐNG] Sẵn sàng cày cuốc!", flush=True)
 
 # =====================================================================
 # ⏰ 5. VÒNG LẶP ĐỒNG HỒ TỰ ĐỘNG CÀO BÀI (ÉP CHẠY XUYÊN ĐÊM KHI TẮT MÁY)
