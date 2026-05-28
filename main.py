@@ -116,6 +116,7 @@ data_store = _sync_load_data()
 current_total_reacts = data_store["stats"]["current_total"]
 TOTAL_REACT_LIMIT = data_store["stats"]["limit"]
 TARGET_CHANNELS = _sync_load_channels()
+channel_checkpoints = {}
 
 # =====================================================================
 # ⚡ HÀM REACT SIÊU TỐC (ÉP TIẾN ĐỘ CHẠY ĐỦ NHANH)
