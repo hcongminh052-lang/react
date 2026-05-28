@@ -21,15 +21,21 @@ def home():
     return "OK", 200
 
 def run_flask():
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port, threaded=False, use_reloader=False)
-
-def keep_alive():
-    t = Thread(target=run_flask)
-    t.daemon = True
-    t.start()
-
-keep_alive()
+    # Thử lấy cổng từ biến môi trường Railway, nếu không có thì mặc định dùng 8080
+    port = int(os.environ.get("PORT", 8080))
+    
+    # Tạo một vòng lặp thử mở cổng, nếu dính lỗi "Address already in use" sẽ tự +1 sang cổng khác
+    while True:
+        try:
+            print(f"📡 [SERVER] Đang cố gắng khởi chạy Keep-Alive Server tại cổng: {port}...", flush=True)
+            app.run(host='0.0.0.0', port=port, threaded=False, use_reloader=False)
+            break # Mở cổng thành công thì thoát vòng lặp
+        except OSError as e:
+            if e.errno == 98 or "[Errno 98]" in str(e) or "already in use" in str(e).lower():
+                print(f"⚠️ Cổng {port} đã bị chiếm dụng! Tự động chuyển sang cổng tiếp theo...", flush=True)
+                port = random.randint(10000, 60000) # Đổi sang một cổng ngẫu nhiên ngặt nghèo để tránh trùng
+            else:
+                raise e
 
 # =====================================================================
 # ⚙️ 2. CẤU HÌNH BIẾN TOÀN CỤC VÀ HỆ THỐNG CHECKPOINT
