@@ -23,21 +23,23 @@ def home():
     return "OK", 200
 
 def run_flask():
-    # Thử lấy cổng từ biến môi trường Railway, nếu không có thì mặc định dùng 8080
-    port = int(os.environ.get("PORT", 8080))
+    # 1. Thử lấy cổng do Railway cấp qua biến môi trường PORT trước
+    # 2. Nếu không có (hoặc chạy local), bốc luôn 1 cổng NGẪU NHIÊN từ 12000-25000 để KHÔNG BAO GIỜ TRÙNG 8080
+    port = int(os.environ.get("PORT", random.randint(12000, 25000)))
     
-    # Tạo một vòng lặp thử mở cổng, nếu dính lỗi "Address already in use" sẽ tự +1 sang cổng khác
+    # Ép buộc tắt sạch log rác mặc định của Flask hiển thị ra màn hình
+    import logging
+    logging.getLogger('werkzeug').setLevel(logging.ERROR)
+    
     while True:
         try:
-            print(f"📡 [SERVER] Đang cố gắng khởi chạy Keep-Alive Server tại cổng: {port}...", flush=True)
+            print(f"📡 [SERVER] Khởi chạy Keep-Alive Server tại cổng tự do: {port}...", flush=True)
+            # Khởi chạy Flask âm thầm
             app.run(host='0.0.0.0', port=port, threaded=False, use_reloader=False)
-            break # Mở cổng thành công thì thoát vòng lặp
-        except OSError as e:
-            if e.errno == 98 or "[Errno 98]" in str(e) or "already in use" in str(e).lower():
-                print(f"⚠️ Cổng {port} đã bị chiếm dụng! Tự động chuyển sang cổng tiếp theo...", flush=True)
-                port = random.randint(10000, 60000) # Đổi sang một cổng ngẫu nhiên ngặt nghèo để tránh trùng
-            else:
-                raise e
+            break
+        except Exception as e:
+            # Nếu đen đủi dính phải cổng bận, bốc ngay một số ngẫu nhiên khác
+            port = random.randint(12000, 25000)
 
 def keep_alive():
     t = Thread(target=run_flask)
