@@ -12,7 +12,7 @@ import logging
 PRIORITY_USERS = [1335190890930769960]
 
 # =====================================================================
-# 🛠️ 1. KEEPALIVE SERVER (GIỮ BOT LUÔN THỨC TRÊN RAILWAY)
+# 🛠️ 1. KEEPALIVE SERVER (GIỮ BOT LUÔN THỨC TRÊN RAILWAY - BỎ CỔNG 8080)
 # =====================================================================
 app = Flask('')
 log = logging.getLogger('werkzeug')
@@ -24,7 +24,7 @@ def home():
 
 def run_flask():
     # 1. Thử lấy cổng do Railway cấp qua biến môi trường PORT trước
-    # 2. Nếu không có (hoặc chạy local), bốc luôn 1 cổng NGẪU NHIÊN từ 12000-25000 để KHÔNG BAO GIỜ TRÙNG 8080
+    # 2. Nếu không có, bốc ngẫu nhiên dải cao từ 12000-25000 để KHÔNG BAO GIỜ bị dính lỗi bận cổng 8080
     port = int(os.environ.get("PORT", random.randint(12000, 25000)))
     
     # Ép buộc tắt sạch log rác mặc định của Flask hiển thị ra màn hình
@@ -34,19 +34,16 @@ def run_flask():
     while True:
         try:
             print(f"📡 [SERVER] Khởi chạy Keep-Alive Server tại cổng tự do: {port}...", flush=True)
-            # Khởi chạy Flask âm thầm
             app.run(host='0.0.0.0', port=port, threaded=False, use_reloader=False)
             break
         except Exception as e:
-            # Nếu đen đủi dính phải cổng bận, bốc ngay một số ngẫu nhiên khác
+            # Nếu trúng phải cổng bận, đổi ngay một số ngẫu nhiên khác
             port = random.randint(12000, 25000)
 
 def keep_alive():
     t = Thread(target=run_flask)
     t.daemon = True
     t.start()
-
-keep_alive()
 
 # =====================================================================
 # ⚙️ 2. CẤU HÌNH BIẾN TOÀN CỤC VÀ HỆ THỐNG CHECKPOINT
@@ -63,15 +60,14 @@ bot = commands.Bot(command_prefix=prefix, help_command=None, intents=intents, se
 
 TOTAL_REACT_LIMIT = 999999
 current_total_reacts = 0
-auto_react_enabled = False # Mặc định để False, gõ !start mới kích hoạt luồng
+auto_react_enabled = False 
 reaction_queue = asyncio.Queue()
 is_cleaning = False
 channel_checkpoints = {}  
 
-trigger_next_clean = asyncio.Event()
 failed_channels_pool = {}  
 
-# 🔥 BIẾN QUẢN LÝ LUỒNG NGẦM ĐỂ CÓ THỂ CANCEL ĐƯỢC
+# BIẾN QUẢN LÝ LUỒNG NGẦM ĐỂ CÓ THỂ CANCEL ĐƯỢC
 loop_manager_task = None
 worker_task = None
 
@@ -182,15 +178,11 @@ async def reaction_worker():
                 await smart_react(msg, msg.channel.id)
                 
             reaction_queue.task_done()
-            
-            if reaction_queue.empty() and not is_cleaning and auto_react_enabled:
-                print("🏁 [HÀNG ĐỢI TRỐNG] Đã xả hết sạch bài cũ! Kích hoạt vòng quét mới...", flush=True)
-                trigger_next_clean.set()
     except asyncio.CancelledError:
         print("📥 [WORKER] Luồng xử lý hàng đợi thả react đã bị hủy hoàn toàn.", flush=True)
 
 # =====================================================================
-# 🧹 5. ĐÀO LẠI BÀI CŨ DỰA TRÊN VẾT CHECKPOINT
+# 🧹 5. ĐÀO LẠI BÀI CŨ DỰA TRÊN VẾT CHECKPOINT (CẬP NHẬT ƯU TIÊN VIP)
 # =====================================================================
 async def follow_old_logic():
     global is_cleaning, channel_checkpoints
@@ -253,7 +245,6 @@ async def follow_old_logic():
                     missing_reactions = [r for r in msg.reactions if str(r.emoji) not in my_reactions]
                     
                     if missing_reactions:
-                        # Đánh dấu thuộc tính is_priority nếu trùng ID VIP
                         if msg.author.id in PRIORITY_USERS:
                             msg.is_priority = True 
                         else:
@@ -272,37 +263,27 @@ async def follow_old_logic():
 
     # === SẮP XẾP HÀNG ĐỢI: ƯU TIÊN VIP LÊN ĐẦU ===
     if global_temp_list and auto_react_enabled:
-        # Tách danh sách thành 2 nhóm riêng biệt
         priority_list = [m for m in global_temp_list if getattr(m, 'is_priority', False)]
         normal_list = [m for m in global_temp_list if not getattr(m, 'is_priority', False)]
         
-        # Xáo trộn nội bộ từng nhóm để bot hành xử tự nhiên
         random.shuffle(priority_list)
         random.shuffle(normal_list)
         
-        # Gộp lại: Nhóm VIP đứng trước, nhóm thường nối gót theo sau
         final_sorted_list = priority_list + normal_list
+        print(f"🔄 Gom thành công {len(global_temp_list)} bài (Tìm thấy {len(priority_list)} bài từ VIP ID {PRIORITY_USERS[0]}). Nạp hàng đợi...", flush=True)
         
-        print(f"🔄 Gom thành công {len(global_temp_list)} bài (Tìm thấy {len(priority_list)} bài từ VIP ID {PRIORITY_USERS[0]}). Đang nạp hàng đợi...", flush=True)
-        
-        # Đẩy vào Queue xử lý theo thứ tự ưu tiên tuyệt đối
         for msg in final_sorted_list:
             await reaction_queue.put(msg)
             
-        del global_temp_list
-        del priority_list
-        del normal_list
-        del final_sorted_list
+        del global_temp_list; del priority_list; del normal_list; del final_sorted_list
     else:
         if auto_react_enabled:
-            print("ℹ️ Mỏ cũ chưa đào thêm được bài hợp lệ. Thử lại sau 20 giây...", flush=True)
-            await asyncio.sleep(20)
-            trigger_next_clean.set()
+            print("ℹ️ Mỏ cũ chưa đào thêm được bài hợp lệ (Mỏ cạn hoặc checkpoint hết). Vòng quét tiếp theo tự nghỉ dài...", flush=True)
 
     is_cleaning = False
 
 # =====================================================================
-# 🔄 6. BỘ QUẢN LÝ VÒNG LẶP LIÊN TỤC THEO TASK RIÊNG
+# 🔄 6. BỘ QUẢN LÝ VÒNG LẶP TUẦN TỰ (SỬA LỖI ĐÓNG BĂNG VÔ HẠN CỦA .WAIT)
 # =====================================================================
 async def auto_loop_manager():
     try:
@@ -310,18 +291,21 @@ async def auto_loop_manager():
             if auto_react_enabled:
                 start_reacts = current_total_reacts
                 
+                # 1. Kích hoạt cào bài cũ
                 await follow_old_logic()
                 
-                await trigger_next_clean.wait()
-                trigger_next_clean.clear() 
+                # 2. Ép vòng lặp đứng đợi cho đến khi Hàng đợi (Queue) tiêu thụ sạch sẽ bài của lượt này
+                while not reaction_queue.empty() and auto_react_enabled:
+                    await asyncio.sleep(1)
                 
                 reacts_gained = current_total_reacts - start_reacts
                 
+                # 3. Phân phối thời gian nghỉ thông minh dựa theo lượng react kiếm được
                 if reacts_gained > 0:
-                    print(f"⚡ [HỆ THỐNG] Lượt vừa rồi cày được {reacts_gained} react. Đào tiếp sau 5s...", flush=True)
-                    await asyncio.sleep(5)
+                    print(f"⚡ [HỆ THỐNG] Lượt vừa rồi cày được {reacts_gained} react. Đào tiếp sau 15 giây...", flush=True)
+                    await asyncio.sleep(15)
                 else:
-                    print("💤 Hệ thống nghỉ 30 giây để giãn cách an toàn API trước khi đào tiếp...", flush=True)
+                    print("💤 Không tăng thêm react nào. Hệ thống nghỉ 30 giây để tránh nghẽn luồng và bảo vệ API...", flush=True)
                     await asyncio.sleep(30)
             else:
                 await asyncio.sleep(1)
@@ -342,17 +326,13 @@ async def start(ctx):
     auto_react_enabled = True
     print("▶️ [KÍCH HOẠT] ĐANG BẬT LUỒNG HỆ THỐNG AUTO REACT...", flush=True)
     
-    # Dọn dẹp hàng đợi cũ nếu còn sót lại trước khi chạy luồng mới
     while not reaction_queue.empty():
         try: reaction_queue.get_nowait()
         except: break
 
-    # Sinh ra 2 Task ngầm độc lập hoàn toàn để quản lý luồng
+    # Tạo luồng xử lý độc lập hoàn toàn
     worker_task = bot.loop.create_task(reaction_worker())
     loop_manager_task = bot.loop.create_task(auto_loop_manager())
-    
-    # Ép kích hoạt lượt quét khai mạc luôn
-    trigger_next_clean.set()
 
 @bot.command()
 async def stop(ctx):
@@ -368,7 +348,6 @@ async def stop(ctx):
     is_cleaning = False
     print("⛔ [DỪNG KHẨN CẤP] ĐANG KHAI TỬ TOÀN BỘ LUỒNG AUTO REACT VÀ WORKER...", flush=True)
     
-    # 💥 KHAI TỬ THẲNG TAY LUỒNG QUẢN LÝ VÒNG LẶP VÀ WORKER
     if loop_manager_task and not loop_manager_task.done():
         loop_manager_task.cancel()
     if worker_task and not worker_task.done():
@@ -377,7 +356,6 @@ async def stop(ctx):
     loop_manager_task = None
     worker_task = None
 
-    # Làm trống rổ hàng đợi ngay lập tức để giải phóng tài nguyên
     while not reaction_queue.empty():
         try: reaction_queue.get_nowait()
         except: break
