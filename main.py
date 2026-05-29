@@ -185,8 +185,8 @@ async def follow_old_logic():
     is_cleaning = True
     print(f"🧹 [HỆ THỐNG] Tiến hành ĐÀO SÂU bài cũ...", flush=True)
 
-    TARGET_PER_CHANNEL = 15   # Giảm xuống 15 để quét nhanh, nhả log sớm
-    MAX_LOOKBACK = 150        # Giới hạn lội ngược dòng 150 tin để tránh nghẽn
+    TARGET_PER_CHANNEL = 15   # Tối ưu số bài lấy mỗi lượt để nhả log nhanh
+    MAX_LOOKBACK = 150        # Giới hạn lội lịch sử 150 tin để tránh nghẽn
     global_temp_list = []
 
     shuffled_channels = TARGET_CHANNELS.copy()
@@ -205,7 +205,7 @@ async def follow_old_logic():
 
             channel = bot.get_channel(cid)
             if not channel: 
-                print(f"⚠️ Không tìm thấy kênh {cid} (Có thể bot không có quyền xem). Thử kênh khác...", flush=True)
+                print(f"⚠️ Không tìm thấy kênh {cid} (Thiếu quyền xem). Thử kênh khác...", flush=True)
                 continue
 
             print(f"🔍 [QUÉT KÊNH] Đang kiểm tra lịch sử kênh: {cid}...", flush=True)
@@ -227,7 +227,7 @@ async def follow_old_logic():
                         history_chunk.append(msg)
                 except Exception as history_error: 
                     print(f"❌ Lỗi API khi lấy lịch sử kênh {cid}: {history_error}. Chuyển kênh!", flush=True)
-                    break # Thoát vòng while của kênh này để sang kênh khác, không treo bot
+                    break 
 
                 if not history_chunk: 
                     print(f"ℹ️ Kênh {cid} đã bị đào cạn sạch lịch sử. Reset về đỉnh!", flush=True)
@@ -244,12 +244,10 @@ async def follow_old_logic():
                         missing_reactions = [r for r in msg.reactions if str(r.emoji) not in my_reactions]
                         
                         if missing_reactions:
-                            if msg.author.id in PRIORITY_USERS:
-                                msg.is_priority = True 
-                            else:
-                                msg.is_priority = False
-
-                            global_temp_list.append(msg)
+                            # Sử dụng Tuple (msg, is_vip) để không ghi đè thuộc tính vào Class Message gốc
+                            is_vip = msg.author.id in PRIORITY_USERS
+                            global_temp_list.append((msg, is_vip))
+                            
                             channel_gathered += 1
                             if channel_gathered >= TARGET_PER_CHANNEL: 
                                 break
@@ -258,13 +256,12 @@ async def follow_old_logic():
             if oldest_msg_id and auto_react_enabled:
                 channel_checkpoints[str(cid)] = {"last_id": str(oldest_msg_id)}
 
-        # Lưu checkpoint sau khi quét xong toàn bộ kênh
         await save_all_data()
 
-        # === SẮP XẾP HÀNG ĐỢI ===
+        # === SẮP XẾP HÀNG ĐỢI: NHÓM VIP ĐỨNG TRƯỚC ===
         if global_temp_list and auto_react_enabled:
-            priority_list = [m for m in global_temp_list if getattr(m, 'is_priority', False)]
-            normal_list = [m for m in global_temp_list if not getattr(m, 'is_priority', False)]
+            priority_list = [item[0] for item in global_temp_list if item[1] is True]
+            normal_list = [item[0] for item in global_temp_list if item[1] is False]
             
             random.shuffle(priority_list)
             random.shuffle(normal_list)
@@ -283,7 +280,6 @@ async def follow_old_logic():
     except Exception as critical_error:
         print(f"🚨 [LỖI HỆ THỐNG] Đã xảy ra lỗi nghiêm trọng trong follow_old_logic: {critical_error}", flush=True)
     finally:
-        # Bắt buộc phải đưa về False dù có lỗi hay không để giải phóng luồng chính
         is_cleaning = False
 
 # =====================================================================
@@ -296,10 +292,8 @@ async def auto_loop_manager():
                 print("\n🔄 [LOOP MANAGER] === BẮT ĐẦU MỘT CHU KỲ QUÉT MỎ MỚI ===", flush=True)
                 start_reacts = current_total_reacts
                 
-                # Gọi hàm cào bài (Hàm này có try-except-finally bảo vệ nên chắc chắn sẽ nhả quyền điều khiển)
                 await follow_old_logic()
                 
-                # Chờ cho đến khi hàng đợi tiêu thụ hết bài
                 if not reaction_queue.empty():
                     print("⏳ [HÀNG ĐỢI] Đang xử lý các bài viết trong hàng đợi...", flush=True)
                 while not reaction_queue.empty() and auto_react_enabled:
@@ -317,7 +311,7 @@ async def auto_loop_manager():
                 await asyncio.sleep(1)
     except asyncio.CancelledError:
         print("🔄 [LOOP MANAGER] Luồng quản lý vòng lặp cào bài tự động đã bị đóng hoàn toàn.", flush=True)
-        
+
 # --- 🔥 HỆ THỐNG LỆNH ĐIỀU KHIỂN START / STOP ---
 @bot.command()
 async def start(ctx):
