@@ -9,6 +9,8 @@ from flask import Flask
 from threading import Thread
 import logging
 
+PRIORITY_USERS = [1335190890930769960]
+
 # =====================================================================
 # 🛠️ 1. KEEPALIVE SERVER (GIỮ BOT LUÔN THỨC TRÊN RAILWAY)
 # =====================================================================
@@ -242,12 +244,19 @@ async def follow_old_logic():
             oldest_msg_id = history_chunk[-1].id
             total_scanned += len(history_chunk)
 
+            # === BỘ LỌC PHÂN LOẠI ƯU TIÊN THEO USER ID ===
             for msg in history_chunk:
                 if msg.reactions:
                     my_reactions = [str(r.emoji) for r in msg.reactions if r.me]
                     missing_reactions = [r for r in msg.reactions if str(r.emoji) not in my_reactions]
                     
                     if missing_reactions:
+                        # Đánh dấu thuộc tính is_priority nếu trùng ID VIP
+                        if msg.author.id in PRIORITY_USERS:
+                            msg.is_priority = True 
+                        else:
+                            msg.is_priority = False
+
                         global_temp_list.append(msg)
                         channel_gathered += 1
                         if channel_gathered >= TARGET_PER_CHANNEL: 
@@ -259,12 +268,29 @@ async def follow_old_logic():
 
     await save_all_data()
 
+    # === SẮP XẾP HÀNG ĐỢI: ƯU TIÊN VIP LÊN ĐẦU ===
     if global_temp_list and auto_react_enabled:
-        print(f"🔄 Gom thành công {len(global_temp_list)} tin nhắn cũ từ checkpoint. Trộn phẳng...", flush=True)
-        random.shuffle(global_temp_list)
-        for msg in global_temp_list:
+        # Tách danh sách thành 2 nhóm riêng biệt
+        priority_list = [m for m in global_temp_list if getattr(m, 'is_priority', False)]
+        normal_list = [m for m in global_temp_list if not getattr(m, 'is_priority', False)]
+        
+        # Xáo trộn nội bộ từng nhóm để bot hành xử tự nhiên
+        random.shuffle(priority_list)
+        random.shuffle(normal_list)
+        
+        # Gộp lại: Nhóm VIP đứng trước, nhóm thường nối gót theo sau
+        final_sorted_list = priority_list + normal_list
+        
+        print(f"🔄 Gom thành công {len(global_temp_list)} bài (Tìm thấy {len(priority_list)} bài từ VIP ID {PRIORITY_USERS[0]}). Đang nạp hàng đợi...", flush=True)
+        
+        # Đẩy vào Queue xử lý theo thứ tự ưu tiên tuyệt đối
+        for msg in final_sorted_list:
             await reaction_queue.put(msg)
+            
         del global_temp_list
+        del priority_list
+        del normal_list
+        del final_sorted_list
     else:
         if auto_react_enabled:
             print("ℹ️ Mỏ cũ chưa đào thêm được bài hợp lệ. Thử lại sau 20 giây...", flush=True)
@@ -272,13 +298,6 @@ async def follow_old_logic():
             trigger_next_clean.set()
 
     is_cleaning = False
-
-@bot.command(aliases=["clean"])
-async def follow_old(ctx):
-    try: await ctx.message.delete()
-    except: pass
-    if auto_react_enabled:
-        await follow_old_logic()
 
 # =====================================================================
 # 🔄 6. BỘ QUẢN LÝ VÒNG LẶP LIÊN TỤC THEO TASK RIÊNG
