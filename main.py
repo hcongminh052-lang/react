@@ -176,119 +176,127 @@ async def reaction_worker():
         print("📥 [WORKER] Luồng xử lý hàng đợi thả react đã bị hủy hoàn toàn.", flush=True)
 
 # =====================================================================
-# 🧹 5. ĐÀO LẠI BÀI CŨ DỰA TRÊN VẾT CHECKPOINT (ƯU TIÊN VIP)
+# 🧹 5. ĐÀO LẠI BÀI CŨ DỰA TRÊN VẾT CHECKPOINT (BẢN AN TOÀN TUYỆT ĐỐI)
 # =====================================================================
 async def follow_old_logic():
     global is_cleaning, channel_checkpoints
     if not auto_react_enabled: return
 
     is_cleaning = True
-    print(f"🧹 [HỆ THỐNG] Đang sử dụng Checkpoint tiến hành ĐÀO SÂU bài cũ...", flush=True)
+    print(f"🧹 [HỆ THỐNG] Tiến hành ĐÀO SÂU bài cũ...", flush=True)
 
-    TARGET_PER_CHANNEL = 35   
-    MAX_LOOKBACK = 400        
+    TARGET_PER_CHANNEL = 15   # Giảm xuống 15 để quét nhanh, nhả log sớm
+    MAX_LOOKBACK = 150        # Giới hạn lội ngược dòng 150 tin để tránh nghẽn
     global_temp_list = []
 
     shuffled_channels = TARGET_CHANNELS.copy()
     random.shuffle(shuffled_channels)
 
-    for cid in shuffled_channels:
-        if current_total_reacts >= TOTAL_REACT_LIMIT or not auto_react_enabled:
-            break
+    try:
+        for cid in shuffled_channels:
+            if current_total_reacts >= TOTAL_REACT_LIMIT or not auto_react_enabled:
+                break
 
-        if cid in failed_channels_pool:
-            if time.time() < failed_channels_pool[cid]["timeout"]:
+            if cid in failed_channels_pool:
+                if time.time() < failed_channels_pool[cid]["timeout"]:
+                    continue
+                else:
+                    failed_channels_pool.pop(cid, None)
+
+            channel = bot.get_channel(cid)
+            if not channel: 
+                print(f"⚠️ Không tìm thấy kênh {cid} (Có thể bot không có quyền xem). Thử kênh khác...", flush=True)
                 continue
-            else:
-                failed_channels_pool.pop(cid, None)
 
-        channel = bot.get_channel(cid)
-        if not channel: continue
-
-        channel_gathered = 0
-        total_scanned = 0
-        
-        oldest_msg_id = channel_checkpoints.get(str(cid), {}).get("last_id")
-        if oldest_msg_id:
-            oldest_msg_id = int(oldest_msg_id)
-
-        while channel_gathered < TARGET_PER_CHANNEL and total_scanned < MAX_LOOKBACK and auto_react_enabled:
-            args = {"limit": 100} 
-            if oldest_msg_id:
-                args["before"] = discord.Object(id=oldest_msg_id)
-
-            history_chunk = []
-            try:
-                async for msg in channel.history(**args): 
-                    history_chunk.append(msg)
-            except: 
-                break
-
-            if not history_chunk: 
-                print(f"ℹ️ Kênh {cid} đã bị đào cạn sạch lịch sử. Reset về đỉnh!", flush=True)
-                channel_checkpoints.pop(str(cid), None) 
-                break
-
-            oldest_msg_id = history_chunk[-1].id
-            total_scanned += len(history_chunk)
-
-            # === BỘ LỌC PHÂN LOẠI ƯU TIÊN THEO USER ID ===
-            for msg in history_chunk:
-                if msg.reactions:
-                    my_reactions = [str(r.emoji) for r in msg.reactions if r.me]
-                    missing_reactions = [r for r in msg.reactions if str(r.emoji) not in my_reactions]
-                    
-                    if missing_reactions:
-                        if msg.author.id in PRIORITY_USERS:
-                            msg.is_priority = True 
-                        else:
-                            msg.is_priority = False
-
-                        global_temp_list.append(msg)
-                        channel_gathered += 1
-                        if channel_gathered >= TARGET_PER_CHANNEL: 
-                            break
-            del history_chunk
-
-        if oldest_msg_id and auto_react_enabled:
-            channel_checkpoints[str(cid)] = {"last_id": str(oldest_msg_id)}
-
-    await save_all_data()
-
-    # === SẮP XẾP HÀNG ĐỢI ===
-    if global_temp_list and auto_react_enabled:
-        priority_list = [m for m in global_temp_list if getattr(m, 'is_priority', False)]
-        normal_list = [m for m in global_temp_list if not getattr(m, 'is_priority', False)]
-        
-        random.shuffle(priority_list)
-        random.shuffle(normal_list)
-        
-        final_sorted_list = priority_list + normal_list
-        print(f"🔄 Gom thành công {len(global_temp_list)} bài (Tìm thấy {len(priority_list)} bài từ VIP ID {PRIORITY_USERS[0]}). Nạp hàng đợi...", flush=True)
-        
-        for msg in final_sorted_list:
-            await reaction_queue.put(msg)
+            print(f"🔍 [QUÉT KÊNH] Đang kiểm tra lịch sử kênh: {cid}...", flush=True)
+            channel_gathered = 0
+            total_scanned = 0
             
-        del global_temp_list; del priority_list; del normal_list; del final_sorted_list
-    else:
-        if auto_react_enabled:
-            print("ℹ️ Lượt quét hoàn tất: Không tìm thấy bài viết nào chứa emoji mới để thả react.", flush=True)
+            oldest_msg_id = channel_checkpoints.get(str(cid), {}).get("last_id")
+            if oldest_msg_id:
+                oldest_msg_id = int(oldest_msg_id)
 
-    is_cleaning = False
+            while channel_gathered < TARGET_PER_CHANNEL and total_scanned < MAX_LOOKBACK and auto_react_enabled:
+                args = {"limit": 100} 
+                if oldest_msg_id:
+                    args["before"] = discord.Object(id=oldest_msg_id)
+
+                history_chunk = []
+                try:
+                    async for msg in channel.history(**args): 
+                        history_chunk.append(msg)
+                except Exception as history_error: 
+                    print(f"❌ Lỗi API khi lấy lịch sử kênh {cid}: {history_error}. Chuyển kênh!", flush=True)
+                    break # Thoát vòng while của kênh này để sang kênh khác, không treo bot
+
+                if not history_chunk: 
+                    print(f"ℹ️ Kênh {cid} đã bị đào cạn sạch lịch sử. Reset về đỉnh!", flush=True)
+                    channel_checkpoints.pop(str(cid), None) 
+                    break
+
+                oldest_msg_id = history_chunk[-1].id
+                total_scanned += len(history_chunk)
+
+                # === BỘ LỌC PHÂN LOẠI ƯU TIÊN THEO USER ID ===
+                for msg in history_chunk:
+                    if msg.reactions:
+                        my_reactions = [str(r.emoji) for r in msg.reactions if r.me]
+                        missing_reactions = [r for r in msg.reactions if str(r.emoji) not in my_reactions]
+                        
+                        if missing_reactions:
+                            if msg.author.id in PRIORITY_USERS:
+                                msg.is_priority = True 
+                            else:
+                                msg.is_priority = False
+
+                            global_temp_list.append(msg)
+                            channel_gathered += 1
+                            if channel_gathered >= TARGET_PER_CHANNEL: 
+                                break
+                del history_chunk
+
+            if oldest_msg_id and auto_react_enabled:
+                channel_checkpoints[str(cid)] = {"last_id": str(oldest_msg_id)}
+
+        # Lưu checkpoint sau khi quét xong toàn bộ kênh
+        await save_all_data()
+
+        # === SẮP XẾP HÀNG ĐỢI ===
+        if global_temp_list and auto_react_enabled:
+            priority_list = [m for m in global_temp_list if getattr(m, 'is_priority', False)]
+            normal_list = [m for m in global_temp_list if not getattr(m, 'is_priority', False)]
+            
+            random.shuffle(priority_list)
+            random.shuffle(normal_list)
+            
+            final_sorted_list = priority_list + normal_list
+            print(f"🔄 Gom thành công {len(global_temp_list)} bài (Tìm thấy {len(priority_list)} bài từ VIP). Nạp hàng đợi...", flush=True)
+            
+            for msg in final_sorted_list:
+                await reaction_queue.put(msg)
+                
+            del global_temp_list; del priority_list; del normal_list; del final_sorted_list
+        else:
+            if auto_react_enabled:
+                print("ℹ️ Kết quả lượt quét: Không tìm thấy bài viết nào chứa emoji mới.", flush=True)
+
+    except Exception as critical_error:
+        print(f"🚨 [LỖI HỆ THỐNG] Đã xảy ra lỗi nghiêm trọng trong follow_old_logic: {critical_error}", flush=True)
+    finally:
+        # Bắt buộc phải đưa về False dù có lỗi hay không để giải phóng luồng chính
+        is_cleaning = False
 
 # =====================================================================
-# 🔄 6. BỘ QUẢN LÝ VÒNG LẶP TUẦN TỰ TUYỆT ĐỐI (ĐÃ THÊM LOG CHU KỲ MỚI)
+# 🔄 6. BỘ QUẢN LÝ VÒNG LẶP TUẦN TỰ (AN TOÀN TUYỆT ĐỐI)
 # =====================================================================
 async def auto_loop_manager():
     try:
         while True:
             if auto_react_enabled:
-                # 📢 LOG QUAN TRỌNG: Báo hiệu luồng đang sống và chạy lượt mới
                 print("\n🔄 [LOOP MANAGER] === BẮT ĐẦU MỘT CHU KỲ QUÉT MỎ MỚI ===", flush=True)
-                
                 start_reacts = current_total_reacts
                 
-                # Chạy cào bài bài cũ
+                # Gọi hàm cào bài (Hàm này có try-except-finally bảo vệ nên chắc chắn sẽ nhả quyền điều khiển)
                 await follow_old_logic()
                 
                 # Chờ cho đến khi hàng đợi tiêu thụ hết bài
@@ -299,18 +307,17 @@ async def auto_loop_manager():
                 
                 reacts_gained = current_total_reacts - start_reacts
                 
-                # Nghỉ giãn cách thông minh
                 if reacts_gained > 0:
                     print(f"⚡ [HỆ THỐNG] Lượt vừa rồi cày được {reacts_gained} react. Đào tiếp sau 15 giây...", flush=True)
                     await asyncio.sleep(15)
                 else:
-                    print("💤 Mỏ trống/Mỏ cạn. Hệ thống ngủ im lặng 30 giây để bảo vệ API tài khoản...", flush=True)
+                    print("💤 Mỏ trống/Mỏ cạn. Hệ thống ngủ 30 giây trước khi đảo chu kỳ mới...", flush=True)
                     await asyncio.sleep(30)
             else:
                 await asyncio.sleep(1)
     except asyncio.CancelledError:
         print("🔄 [LOOP MANAGER] Luồng quản lý vòng lặp cào bài tự động đã bị đóng hoàn toàn.", flush=True)
-
+        
 # --- 🔥 HỆ THỐNG LỆNH ĐIỀU KHIỂN START / STOP ---
 @bot.command()
 async def start(ctx):
