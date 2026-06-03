@@ -176,7 +176,7 @@ async def reaction_worker():
         print("📥 [WORKER] Luồng xử lý hàng đợi thả react đã bị hủy hoàn toàn.", flush=True)
 
 # =====================================================================
-# 🧹 5. ĐÀO LẠI BÀI CŨ DỰA TRÊN VẾT CHECKPOINT (BẢN AN TOÀN TUYỆT ĐỐI)
+# 🧹 5. ĐÀO LẠI BÀI CŨ DỰA TRÊN VẾT CHECKPOINT (BẢN SỬA LỖI CHẠM ĐÁY)
 # =====================================================================
 async def follow_old_logic():
     global is_cleaning, channel_checkpoints
@@ -185,8 +185,8 @@ async def follow_old_logic():
     is_cleaning = True
     print(f"🧹 [HỆ THỐNG] Tiến hành ĐÀO SÂU bài cũ...", flush=True)
 
-    TARGET_PER_CHANNEL = 50
-    MAX_LOOKBACK = 600
+    TARGET_PER_CHANNEL = 40   # Số bài gom mỗi kênh cho 1 chu kỳ
+    MAX_LOOKBACK = 1500       # Nâng hạn mức lội ngược dòng lên 1500 tin để đào sâu hơn hẳn
     global_temp_list = []
 
     shuffled_channels = TARGET_CHANNELS.copy()
@@ -213,6 +213,12 @@ async def follow_old_logic():
             total_scanned = 0
             
             oldest_msg_id = channel_checkpoints.get(str(cid), {}).get("last_id")
+            
+            # ĐẶC BIỆT: Nếu kênh này đã từng đào cạn đến tận năm 2020, bỏ qua không quét lại nữa để tiết kiệm thời gian
+            if oldest_msg_id == "BOTTOM_REACHED":
+                print(f"ℹ️ Kênh {cid} đã cày cạn sạch về quá khứ lịch sử trước đó. Bỏ qua.", flush=True)
+                continue
+                
             if oldest_msg_id:
                 oldest_msg_id = int(oldest_msg_id)
 
@@ -229,9 +235,10 @@ async def follow_old_logic():
                     print(f"❌ Lỗi API khi lấy lịch sử kênh {cid}: {history_error}. Chuyển kênh!", flush=True)
                     break 
 
+                # SỬA LỖI TẠI ĐÂY: Khi thực sự hết bài, đánh dấu ĐÃ CHẠM ĐÁY vĩnh viễn thay vì xóa checkpoint
                 if not history_chunk: 
-                    print(f"ℹ️ Kênh {cid} đã bị đào cạn sạch lịch sử. Reset về đỉnh!", flush=True)
-                    channel_checkpoints.pop(str(cid), None) 
+                    print(f"🎉 Kênh {cid} đã được cày cuốc đến tận cùng lịch sử (Năm 2020)!", flush=True)
+                    channel_checkpoints[str(cid)] = {"last_id": "BOTTOM_REACHED"}
                     break
 
                 oldest_msg_id = history_chunk[-1].id
@@ -244,7 +251,6 @@ async def follow_old_logic():
                         missing_reactions = [r for r in msg.reactions if str(r.emoji) not in my_reactions]
                         
                         if missing_reactions:
-                            # Sử dụng Tuple (msg, is_vip) để không ghi đè thuộc tính vào Class Message gốc
                             is_vip = msg.author.id in PRIORITY_USERS
                             global_temp_list.append((msg, is_vip))
                             
@@ -253,7 +259,8 @@ async def follow_old_logic():
                                 break
                 del history_chunk
 
-            if oldest_msg_id and auto_react_enabled:
+            # Nếu chưa chạm đáy hoàn toàn thì lưu lại ID tin nhắn cũ nhất để lượt sau đào tiếp
+            if oldest_msg_id and auto_react_enabled and channel_checkpoints.get(str(cid), {}).get("last_id") != "BOTTOM_REACHED":
                 channel_checkpoints[str(cid)] = {"last_id": str(oldest_msg_id)}
 
         await save_all_data()
