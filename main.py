@@ -385,6 +385,17 @@ async def reload(ctx):
     except Exception as e:
         print(f"❌ Lỗi reload danh sách kênh: {e}", flush=True)
 
+@bot.command()
+async def reset(ctx):
+    try: await ctx.message.delete()
+    except: pass
+    global channel_checkpoints
+    
+    # Ép dữ liệu checkpoint về rỗng
+    channel_checkpoints = {}
+    await save_all_data()
+    print("🧹 [HỆ THỐNG] Đã xóa sạch toàn bộ file checkpoint thành công!", flush=True)
+
 @bot.event
 async def on_ready():
     print(f"✅ Bot Online (Môi trường Railway Cloud) | Tiến độ hiện tại: {current_total_reacts}/{TOTAL_REACT_LIMIT}", flush=True)
