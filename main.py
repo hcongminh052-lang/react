@@ -185,8 +185,8 @@ async def follow_old_logic():
     is_cleaning = True
     print(f"🧹 [HỆ THỐNG] Tiến hành ĐÀO SÂU bài cũ...", flush=True)
 
-    TARGET_PER_CHANNEL = 100
-    MAX_LOOKBACK = 10000
+    TARGET_PER_CHANNEL = 50
+    MAX_LOOKBACK = 600
     global_temp_list = []
 
     shuffled_channels = TARGET_CHANNELS.copy()
