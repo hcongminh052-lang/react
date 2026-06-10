@@ -24,10 +24,6 @@ def home():
 
 def run_flask():
     port = int(os.environ.get("PORT", random.randint(12000, 25000)))
-    
-    import logging
-    logging.getLogger('werkzeug').setLevel(logging.ERROR)
-    
     while True:
         try:
             print(f"📡 [SERVER] Khởi chạy Keep-Alive Server tại cổng tự do: {port}...", flush=True)
@@ -137,23 +133,18 @@ async def smart_react(msg, channel_id):
             await msg.add_reaction(reaction.emoji)
             current_total_reacts += 1
             print(f"[{channel_id}] ✨ Đã thả: {current_total_reacts}/{TOTAL_REACT_LIMIT}", flush=True)
-            await asyncio.sleep(random.uniform(0.25, 0.5)) 
-        except discord.errors.HTTPException as e:
-            if e.code == 10014:
-                print(f"⚠️ Bỏ qua emoji lỗi 10014 tại kênh {channel_id}", flush=True)
-                if channel_id not in failed_channels_pool:
-                    failed_channels_pool[channel_id] = {"count": 1, "timeout": 0}
-                else:
-                    failed_channels_pool[channel_id]["count"] += 1
-                    
-                if failed_channels_pool[channel_id]["count"] >= 2:
-                    failed_channels_pool[channel_id]["timeout"] = time.time() + 1800
-                    print(f"🚫 [DANH SÁCH ĐEN] Kênh {channel_id} lỗi liên tiếp 2 lần. Khóa quét kênh này trong 30 phút!", flush=True)
-                continue 
+            await asyncio.sleep(random.uniform(0.3, 0.6)) 
+        except (discord.errors.HTTPException, discord.errors.InvalidArgument, Exception):
+            print(f"⚠️ Bỏ qua tác vụ lỗi tại kênh {channel_id}", flush=True)
+            if channel_id not in failed_channels_pool:
+                failed_channels_pool[channel_id] = {"count": 1, "timeout": 0}
             else:
-                continue
-        except Exception as e:
-            continue
+                failed_channels_pool[channel_id]["count"] += 1
+                
+            if failed_channels_pool[channel_id]["count"] >= 3:
+                failed_channels_pool[channel_id]["timeout"] = time.time() + 1800
+                print(f"🚫 [DANH SÁCH ĐEN] Kênh {channel_id} lỗi liên tục. Khóa quét 30 phút!", flush=True)
+            break
 
     if current_total_reacts % 30 == 0:
         await save_all_data()
@@ -176,17 +167,16 @@ async def reaction_worker():
         print("📥 [WORKER] Luồng xử lý hàng đợi thả react đã bị hủy hoàn toàn.", flush=True)
 
 # =====================================================================
-# 🧹 5. ĐÀO LẠI BÀI CŨ DỰA TRÊN VẾT CHECKPOINT (BẢN SỬA LỖI CHẠM ĐÁY)
+# 🧹 5. ĐÀO SÂU LIÊN TỤC VỀ QUÁ KHỨ (CÀY ĐẾN KHI CÓ BÀI MỚI THÔI)
 # =====================================================================
 async def follow_old_logic():
     global is_cleaning, channel_checkpoints
     if not auto_react_enabled: return
 
     is_cleaning = True
-    print(f"🧹 [HỆ THỐNG] Tiến hành ĐÀO SÂU bài cũ...", flush=True)
+    print(f"🧹 [HỆ THỐNG] Tiến hành ĐÀO SÂU liên tục về bài cũ...", flush=True)
 
-    TARGET_PER_CHANNEL = 40   # Số bài gom mỗi kênh cho 1 chu kỳ
-    MAX_LOOKBACK = 1500       # Nâng hạn mức lội ngược dòng lên 1500 tin để đào sâu hơn hẳn
+    TARGET_PER_CHANNEL = 40   # Chỉ tiêu: Gom đủ 40 bài viết cần thả react cho mỗi kênh
     global_temp_list = []
 
     shuffled_channels = TARGET_CHANNELS.copy()
@@ -205,27 +195,25 @@ async def follow_old_logic():
 
             channel = bot.get_channel(cid)
             if not channel: 
-                print(f"⚠️ Không tìm thấy kênh {cid} (Thiếu quyền xem). Thử kênh khác...", flush=True)
+                print(f"⚠️ Không tìm thấy kênh {cid} hoặc thiếu quyền xem. Khóa kênh này 2 tiếng.", flush=True)
+                failed_channels_pool[cid] = {"count": 1, "timeout": time.time() + 7200}
                 continue
 
-            print(f"🔍 [QUÉT KÊNH] Đang kiểm tra lịch sử kênh: {cid}...", flush=True)
-            channel_gathered = 0
-            total_scanned = 0
-            
             oldest_msg_id = channel_checkpoints.get(str(cid), {}).get("last_id")
-            
-            # ĐẶC BIỆT: Nếu kênh này đã từng đào cạn đến tận năm 2020, bỏ qua không quét lại nữa để tiết kiệm thời gian
             if oldest_msg_id == "BOTTOM_REACHED":
-                print(f"ℹ️ Kênh {cid} đã cày cạn sạch về quá khứ lịch sử trước đó. Bỏ qua.", flush=True)
                 continue
                 
-            if oldest_msg_id:
-                oldest_msg_id = int(oldest_msg_id)
+            print(f"🔍 [QUÉT KÊNH] Bắt đầu đào sâu lịch sử kênh: {cid}...", flush=True)
+            channel_gathered = 0
+            
+            # Khởi tạo con trỏ tin nhắn cũ dựa trên checkpoint
+            current_cursor_id = int(oldest_msg_id) if oldest_msg_id else None
 
-            while channel_gathered < TARGET_PER_CHANNEL and total_scanned < MAX_LOOKBACK and auto_react_enabled:
+            # 🔄 VÒNG LẶP ĐÀO SÂU VÔ HẠN: Ép bot cày sâu xuống mãi cho đến khi Gom Đủ Chỉ Tiêu hoặc Chạm Đáy Kênh
+            while channel_gathered < TARGET_PER_CHANNEL and auto_react_enabled:
                 args = {"limit": 100} 
-                if oldest_msg_id:
-                    args["before"] = discord.Object(id=oldest_msg_id)
+                if current_cursor_id:
+                    args["before"] = discord.Object(id=current_cursor_id)
 
                 history_chunk = []
                 try:
@@ -233,39 +221,48 @@ async def follow_old_logic():
                         history_chunk.append(msg)
                 except Exception as history_error: 
                     print(f"❌ Lỗi API khi lấy lịch sử kênh {cid}: {history_error}. Chuyển kênh!", flush=True)
+                    failed_channels_pool[cid] = {"count": 1, "timeout": time.time() + 7200}
                     break 
 
-                # SỬA LỖI TẠI ĐÂY: Khi thực sự hết bài, đánh dấu ĐÃ CHẠM ĐÁY vĩnh viễn thay vì xóa checkpoint
+                # Nếu không còn tin nhắn cũ nào nữa -> Kênh chính thức cạn đáy
                 if not history_chunk: 
-                    print(f"🎉 Kênh {cid} đã được cày cuốc đến tận cùng lịch sử (Năm 2020)!", flush=True)
+                    print(f"🎉 Kênh {cid} đã được đào tận gốc, không còn tin nhắn nào trong lịch sử!", flush=True)
                     channel_checkpoints[str(cid)] = {"last_id": "BOTTOM_REACHED"}
                     break
 
-                oldest_msg_id = history_chunk[-1].id
-                total_scanned += len(history_chunk)
+                # Cập nhật con trỏ dịch sâu xuống tin nhắn cũ nhất vừa lấy được
+                current_cursor_id = history_chunk[-1].id
+                valid_count_in_chunk = 0
 
-                # === BỘ LỌC PHÂN LOẠI ƯU TIÊN THEO USER ID ===
                 for msg in history_chunk:
                     if msg.reactions:
                         my_reactions = [str(r.emoji) for r in msg.reactions if r.me]
                         missing_reactions = [r for r in msg.reactions if str(r.emoji) not in my_reactions]
                         
+                        # Nếu phát hiện bài viết có emoji mà mình chưa thả -> Gom bài!
                         if missing_reactions:
                             is_vip = msg.author.id in PRIORITY_USERS
                             global_temp_list.append((msg, is_vip))
                             
                             channel_gathered += 1
+                            valid_count_in_chunk += 1
                             if channel_gathered >= TARGET_PER_CHANNEL: 
                                 break
+                                
                 del history_chunk
+                
+                # Nếu nguyên một cụm 100 tin nhắn vừa quét không có bài nào để react, log ra để theo dõi tiến độ đào sâu
+                if valid_count_in_chunk == 0:
+                    print(f"   ↳ [ĐÀO SÂU] Kênh {cid} toàn bài đã thả. Đang bơi tiếp xuống dưới ID: {current_cursor_id}...", flush=True)
+                    await asyncio.sleep(0.2) # Nghỉ cực ngắn 0.2s để chống nghẽn nghẽn cổng API Discord
 
-            # Nếu chưa chạm đáy hoàn toàn thì lưu lại ID tin nhắn cũ nhất để lượt sau đào tiếp
-            if oldest_msg_id and auto_react_enabled and channel_checkpoints.get(str(cid), {}).get("last_id") != "BOTTOM_REACHED":
-                channel_checkpoints[str(cid)] = {"last_id": str(oldest_msg_id)}
+            # Lưu lại vị trí sâu nhất đã đào được của kênh này
+            if current_cursor_id and auto_react_enabled and channel_checkpoints.get(str(cid), {}).get("last_id") != "BOTTOM_REACHED":
+                channel_checkpoints[str(cid)] = {"last_id": str(current_cursor_id)}
 
         await save_all_data()
 
-        # === SẮP XẾP HÀNG ĐỢI: NHÓM VIP ĐỨNG TRƯỚC ===
+        # === NẠP BÀI VÀO HÀNG ĐỢI WORKER ===
         if global_temp_list and auto_react_enabled:
             priority_list = [item[0] for item in global_temp_list if item[1] is True]
             normal_list = [item[0] for item in global_temp_list if item[1] is False]
@@ -274,7 +271,7 @@ async def follow_old_logic():
             random.shuffle(normal_list)
             
             final_sorted_list = priority_list + normal_list
-            print(f"🔄 Gom thành công {len(global_temp_list)} bài (Tìm thấy {len(priority_list)} bài từ VIP). Nạp hàng đợi...", flush=True)
+            print(f"🔄 Gom thành công {len(global_temp_list)} bài hợp lệ. Nạp hàng đợi...", flush=True)
             
             for msg in final_sorted_list:
                 await reaction_queue.put(msg)
@@ -282,15 +279,15 @@ async def follow_old_logic():
             del global_temp_list; del priority_list; del normal_list; del final_sorted_list
         else:
             if auto_react_enabled:
-                print("ℹ️ Kết quả lượt quét: Không tìm thấy bài viết nào chứa emoji mới.", flush=True)
+                print("ℹ️ Kết quả lượt quét: Không tìm thấy bài viết nào chứa emoji mới trên toàn hệ thống.", flush=True)
 
     except Exception as critical_error:
-        print(f"🚨 [LỖI HỆ THỐNG] Đã xảy ra lỗi nghiêm trọng trong follow_old_logic: {critical_error}", flush=True)
+        print(f"🚨 [LỖI HỆ THỐNG] Lỗi nghiêm trọng: {critical_error}", flush=True)
     finally:
         is_cleaning = False
 
 # =====================================================================
-# 🔄 6. BỘ QUẢN LÝ VÒNG LẶP TUẦN TỰ (AN TOÀN TUYỆT ĐỐI)
+# 🔄 6. BỘ QUẢN LÝ VÒNG LẶP TUẦN TỰ
 # =====================================================================
 async def auto_loop_manager():
     try:
@@ -301,8 +298,6 @@ async def auto_loop_manager():
                 
                 await follow_old_logic()
                 
-                if not reaction_queue.empty():
-                    print("⏳ [HÀNG ĐỢI] Đang xử lý các bài viết trong hàng đợi...", flush=True)
                 while not reaction_queue.empty() and auto_react_enabled:
                     await asyncio.sleep(1)
                 
@@ -312,23 +307,20 @@ async def auto_loop_manager():
                     print(f"⚡ [HỆ THỐNG] Lượt vừa rồi cày được {reacts_gained} react. Đào tiếp sau 15 giây...", flush=True)
                     await asyncio.sleep(15)
                 else:
-                    print("💤 Mỏ trống/Mỏ cạn. Hệ thống ngủ 30 giây trước khi đảo chu kỳ mới...", flush=True)
-                    await asyncio.sleep(30)
+                    print("💤 Tất cả các kênh đã cạn kiệt đến tận đáy lịch sử. Hệ thống nghỉ 10 phút...", flush=True)
+                    await asyncio.sleep(600)
             else:
                 await asyncio.sleep(1)
     except asyncio.CancelledError:
-        print("🔄 [LOOP MANAGER] Luồng quản lý vòng lặp cào bài tự động đã bị đóng hoàn toàn.", flush=True)
+        print("🔄 [LOOP MANAGER] Luồng quản lý vòng lặp đã bị tắt.", flush=True)
 
-# --- 🔥 HỆ THỐNG LỆNH ĐIỀU KHIỂN START / STOP ---
+# --- 🔥 HỆ THỐNG LỆNH ĐIỀU KHIỂN ---
 @bot.command()
 async def start(ctx):
     try: await ctx.message.delete()
     except: pass
     global auto_react_enabled, loop_manager_task, worker_task
-    
-    if auto_react_enabled:
-        print("⚠️ Hệ thống Auto React vốn đã đang chạy rồi!", flush=True)
-        return
+    if auto_react_enabled: return
 
     auto_react_enabled = True
     print("▶️ [KÍCH HOẠT] ĐANG BẬT LUỒNG HỆ THỐNG AUTO REACT...", flush=True)
@@ -345,19 +337,14 @@ async def stop(ctx):
     try: await ctx.message.delete()
     except: pass
     global auto_react_enabled, loop_manager_task, worker_task, is_cleaning
-    
-    if not auto_react_enabled:
-        print("⚠️ Hệ thống hiện đang tắt, không cần dừng!", flush=True)
-        return
+    if not auto_react_enabled: return
 
     auto_react_enabled = False
     is_cleaning = False
     print("⛔ [DỪNG KHẨN CẤP] ĐANG KHAI TỬ TOÀN BỘ LUỒNG AUTO REACT VÀ WORKER...", flush=True)
     
-    if loop_manager_task and not loop_manager_task.done():
-        loop_manager_task.cancel()
-    if worker_task and not worker_task.done():
-        worker_task.cancel()
+    if loop_manager_task and not loop_manager_task.done(): loop_manager_task.cancel()
+    if worker_task and not worker_task.done(): worker_task.cancel()
         
     loop_manager_task = None
     worker_task = None
@@ -389,23 +376,17 @@ async def reload(ctx):
 async def reset(ctx):
     try: await ctx.message.delete()
     except: pass
-    global channel_checkpoints
-    
-    # Ép dữ liệu checkpoint về rỗng
+    global channel_checkpoints, failed_channels_pool
     channel_checkpoints = {}
+    failed_channels_pool = {} 
     await save_all_data()
-    print("🧹 [HỆ THỐNG] Đã xóa sạch toàn bộ file checkpoint thành công!", flush=True)
+    print("🧹 [HỆ THỐNG] Đã xóa sạch toàn bộ dữ liệu checkpoint và giải phóng kênh lỗi!", flush=True)
 
 @bot.event
 async def on_ready():
     print(f"✅ Bot Online (Môi trường Railway Cloud) | Tiến độ hiện tại: {current_total_reacts}/{TOTAL_REACT_LIMIT}", flush=True)
-    print(f"💡 Sử dụng lệnh !start để bắt đầu luồng cày và !stop để dừng khẩn cấp.", flush=True)
 
-# =====================================================================
-# 🚀 KHỞI CHẠY
-# =====================================================================
 keep_alive()
-
 try:
     bot.run(TOKEN, bot=False, reconnect=True)
 except Exception as e:
