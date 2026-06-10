@@ -12,7 +12,7 @@ import logging
 PRIORITY_USERS = [1335190890930769960]
 
 # =====================================================================
-# 🛠️ 1. KEEPALIVE SERVER (KHÔNG DÙNG CỔNG CỐ ĐỊNH CHỐNG CRASH)
+# 🛠️ 1. KEEPALIVE SERVER
 # =====================================================================
 app = Flask('')
 log = logging.getLogger('werkzeug')
@@ -61,6 +61,7 @@ failed_channels_pool = {}
 
 loop_manager_task = None
 worker_task = None
+bg_mining_task = None  # Luồng đào ngầm tích lũy hàng đợi trong lúc ngủ
 
 def _sync_load_data():
     default_data = {"stats": {"current_total": 0, "limit": TOTAL_REACT_LIMIT}, "checkpoints": {}}
@@ -143,7 +144,7 @@ async def smart_react(msg, channel_id):
                 
             if failed_channels_pool[channel_id]["count"] >= 3:
                 failed_channels_pool[channel_id]["timeout"] = time.time() + 1800
-                print(f"🚫 [DANH SÁCH ĐEN] Kênh {channel_id} lỗi liên tục. Khóa quét 30 phút!", flush=True)
+                print(f"🚫 [DANH SÁCH ĐEN] Kênh {channel_id} lỗi liên tiếp. Khóa quét 30 phút!", flush=True)
             break
 
     if current_total_reacts % 30 == 0:
@@ -167,16 +168,13 @@ async def reaction_worker():
         print("📥 [WORKER] Luồng xử lý hàng đợi thả react đã bị hủy hoàn toàn.", flush=True)
 
 # =====================================================================
-# 🧹 5. ĐÀO SÂU LIÊN TỤC VỀ QUÁ KHỨ (BẢN TĂNG TỐC SẢI BƯỚC VƯỢT VÙNG TRỐNG)
+# 🧹 5. ĐÀO SÂU LIÊN TỤC VỀ QUÁ KHỨ (HÀM CỐT LÕI DÙNG CHUNG)
 # =====================================================================
-async def follow_old_logic():
+async def follow_old_logic(target_per_channel=40):
     global is_cleaning, channel_checkpoints
     if not auto_react_enabled: return
 
     is_cleaning = True
-    print(f"🧹 [HỆ THỐNG] Tiến hành ĐÀO SÂU liên tục về bài cũ...", flush=True)
-
-    TARGET_PER_CHANNEL = 40   # Chỉ tiêu gom bài mỗi kênh
     global_temp_list = []
 
     shuffled_channels = TARGET_CHANNELS.copy()
@@ -187,6 +185,10 @@ async def follow_old_logic():
             if current_total_reacts >= TOTAL_REACT_LIMIT or not auto_react_enabled:
                 break
 
+            # Kiểm tra giới hạn kích thước hàng đợi (Nếu tích trữ sẵn quá 200 bài thì tạm dừng đào để tránh đầy RAM)
+            if reaction_queue.qsize() >= 200:
+                break
+
             if cid in failed_channels_pool:
                 if time.time() < failed_channels_pool[cid]["timeout"]:
                     continue
@@ -195,7 +197,6 @@ async def follow_old_logic():
 
             channel = bot.get_channel(cid)
             if not channel: 
-                print(f"⚠️ Không tìm thấy kênh {cid} hoặc thiếu quyền xem. Khóa kênh này 2 tiếng.", flush=True)
                 failed_channels_pool[cid] = {"count": 1, "timeout": time.time() + 7200}
                 continue
 
@@ -203,15 +204,13 @@ async def follow_old_logic():
             if oldest_msg_id == "BOTTOM_REACHED":
                 continue
                 
-            print(f"🔍 [QUÉT KÊNH] Bắt đầu đào sâu lịch sử kênh: {cid}...", flush=True)
             channel_gathered = 0
-            
             current_cursor_id = int(oldest_msg_id) if oldest_msg_id else None
-            consecutive_empty_chunks = 0  # Đếm số lần liên tiếp cào trúng cụm không có reaction
+            consecutive_empty_chunks = 0  
 
-            while channel_gathered < TARGET_PER_CHANNEL and auto_react_enabled:
-                # TĂNG TỐC: Lấy tối đa 200 tin nhắn một lần thay vì 100 để nhảy cóc nhanh hơn qua vùng trống
-                args = {"limit": 500} 
+            while channel_gathered < target_per_channel and auto_react_enabled:
+                # Sải bước 200 tin nhắn để kiểm tra tốc độ cao (~1000 bài/phút)
+                args = {"limit": 200} 
                 if current_cursor_id:
                     args["before"] = discord.Object(id=current_cursor_id)
 
@@ -219,13 +218,12 @@ async def follow_old_logic():
                 try:
                     async for msg in channel.history(**args): 
                         history_chunk.append(msg)
-                except Exception as history_error: 
-                    print(f"❌ Lỗi API khi lấy lịch sử kênh {cid}: {history_error}. Chuyển kênh!", flush=True)
+                except Exception: 
                     failed_channels_pool[cid] = {"count": 1, "timeout": time.time() + 7200}
                     break 
 
                 if not history_chunk: 
-                    print(f"🎉 Kênh {cid} đã được đào tận gốc, không còn tin nhắn nào trong lịch sử!", flush=True)
+                    print(f"🎉 Kênh {cid} đã được đào tận gốc lịch sử!", flush=True)
                     channel_checkpoints[str(cid)] = {"last_id": "BOTTOM_REACHED"}
                     break
 
@@ -243,21 +241,20 @@ async def follow_old_logic():
                             
                             channel_gathered += 1
                             valid_count_in_chunk += 1
-                            if channel_gathered >= TARGET_PER_CHANNEL: 
+                            if channel_gathered >= target_per_channel: 
                                 break
                                 
                 del history_chunk
                 
                 if valid_count_in_chunk == 0:
                     consecutive_empty_chunks += 1
-                    # Cứ mỗi 5 cụm trống (khoảng 1000 tin nhắn không react), in log một lần để tránh làm rác log Railway
                     if consecutive_empty_chunks % 5 == 0:
-                        print(f"   ↳ [XUYÊN THẤU] Kênh {cid} đã vượt qua {consecutive_empty_chunks * 200} bài không có reaction. Hiện tại tới ID: {current_cursor_id}...", flush=True)
-                    
-                    # Giãn cách 0.4s để tránh bị dính Rate Limit ngầm từ Discord khi bơi quá nhanh
-                    await asyncio.sleep(0.4) 
+                        print(f"   ↳ [ĐÀO NGẦM] Kênh {cid} đang bơi qua vùng trống, hiện tại tới ID: {current_cursor_id}...", flush=True)
+                    # Giữ nhịp độ an toàn ~1000 tin nhắn / phút (Quét khối 200 bài cần sleep ~12 giây, chia ra 1.2s mỗi khối)
+                    await asyncio.sleep(1.2) 
                 else:
-                    consecutive_empty_chunks = 0  # Reset nếu tìm thấy bài có reaction
+                    consecutive_empty_chunks = 0  
+                    await asyncio.sleep(0.5)
 
             if current_cursor_id and auto_react_enabled and channel_checkpoints.get(str(cid), {}).get("last_id") != "BOTTOM_REACHED":
                 channel_checkpoints[str(cid)] = {"last_id": str(current_cursor_id)}
@@ -272,44 +269,77 @@ async def follow_old_logic():
             random.shuffle(normal_list)
             
             final_sorted_list = priority_list + normal_list
-            print(f"🔄 Gom thành công {len(global_temp_list)} bài hợp lệ. Nạp hàng đợi...", flush=True)
             
+            # Đẩy trực tiếp vào hàng đợi xử lý chung
             for msg in final_sorted_list:
                 await reaction_queue.put(msg)
-                
+            
+            print(f"📦 [TÍCH TRỮ] Đã gom và tích lũy thêm {len(global_temp_list)} bài vào hàng đợi dự phòng. (Tổng hàng đợi hiện tại: {reaction_queue.qsize()})", flush=True)
             del global_temp_list; del priority_list; del normal_list; del final_sorted_list
-        else:
-            if auto_react_enabled:
-                print("ℹ️ Kết quả lượt quét: Không tìm thấy bài viết nào chứa emoji mới trên toàn hệ thống.", flush=True)
 
     except Exception as critical_error:
-        print(f"🚨 [LỖI HỆ THỐNG] Lỗi nghiêm trọng: {critical_error}", flush=True)
+        print(f"🚨 [LỖI HỆ THỐNG] Lỗi ngầm: {critical_error}", flush=True)
     finally:
         is_cleaning = False
-        
+
 # =====================================================================
-# 🔄 6. BỘ QUẢN LÝ VÒNG LẶP TUẦN TỰ
+# 💤 6. LUỒNG KHAI THÁC NGẦM TRONG THỜI GIAN NGHỈ (PRE-FETCHING MINER)
+# =====================================================================
+async def background_mining_worker(sleep_duration):
+    """Tận dụng thời gian bot nghỉ để đi săn trước bài cũ tích lũy vào RAM"""
+    print(f"⛏️ [MINER NGẦM] Kích hoạt luồng đào ngầm tích trữ bài trong {sleep_duration} giây nghỉ...", flush=True)
+    end_time = time.time() + sleep_duration
+    
+    # Liên tục chạy xuyên suốt thời gian nghỉ cho đến khi hết giờ
+    while time.time() < end_time and auto_react_enabled:
+        # Nếu hàng đợi đã quá đầy (trên 150 bài), nghỉ tí kẻo nghẽn RAM
+        if reaction_queue.qsize() >= 150:
+            await asyncio.sleep(2)
+            continue
+            
+        # Gọi lệnh đào với chỉ tiêu nhỏ (15 bài mỗi kênh) để dịch chuyển liên tục qua nhiều kênh
+        await follow_old_logic(target_per_channel=15)
+        await asyncio.sleep(1)
+
+# =====================================================================
+# 🔄 7. BỘ QUẢN LÝ VÒNG LẶP TUẦN TỰ (ĐÃ NÂNG CẤP)
 # =====================================================================
 async def auto_loop_manager():
+    global bg_mining_task
     try:
         while True:
             if auto_react_enabled:
                 print("\n🔄 [LOOP MANAGER] === BẮT ĐẦU MỘT CHU KỲ QUÉT MỎ MỚI ===", flush=True)
                 start_reacts = current_total_reacts
                 
-                await follow_old_logic()
+                # Bước 1: Nếu hàng đợi đang trống, chạy cào bài chính diện
+                if reaction_queue.empty():
+                    print("🔍 [HỆ THỐNG] Hàng đợi trống. Tiến hành quét tìm bài...", flush=True)
+                    await follow_old_logic(target_per_channel=40)
+                else:
+                    print(f"⚡ [HỆ THỐNG] Hàng đợi đã được tích lũy sẵn {reaction_queue.qsize()} bài từ trước! Bung lụa react ngay...", flush=True)
                 
+                # Bước 2: Chờ Worker tiêu thụ hết sạch đống bài trong hàng đợi
                 while not reaction_queue.empty() and auto_react_enabled:
                     await asyncio.sleep(1)
                 
                 reacts_gained = current_total_reacts - start_reacts
                 
+                # Bước 3: Đưa bot vào trạng thái nghỉ, đồng thời kích hoạt luồng đào trước dữ liệu lịch sử
                 if reacts_gained > 0:
-                    print(f"⚡ [HỆ THỐNG] Lượt vừa rồi cày được {reacts_gained} react. Đào tiếp sau 15 giây...", flush=True)
-                    await asyncio.sleep(15)
+                    sleep_time = 15
+                    print(f"⚡ [HỆ THỐNG] Lượt vừa rồi cày được {reacts_gained} react.", flush=True)
+                    
+                    # Tạo luồng đào ngầm chạy song song trong lúc ngủ 15s
+                    bg_mining_task = bot.loop.create_task(background_mining_worker(sleep_time))
+                    await asyncio.sleep(sleep_time)
                 else:
-                    print("💤 Tất cả các kênh đã cạn kiệt đến tận đáy lịch sử. Hệ thống nghỉ 10 phút...", flush=True)
-                    await asyncio.sleep(600)
+                    sleep_time = 600
+                    print("💤 Toàn bộ mỏ hiện tại đã cạn hoặc lỗi. Hệ thống ngủ 10 phút...", flush=True)
+                    
+                    # Tạo luồng đào ngầm chạy song song trong lúc ngủ 10 phút
+                    bg_mining_task = bot.loop.create_task(background_mining_worker(sleep_time))
+                    await asyncio.sleep(sleep_time)
             else:
                 await asyncio.sleep(1)
     except asyncio.CancelledError:
@@ -337,18 +367,20 @@ async def start(ctx):
 async def stop(ctx):
     try: await ctx.message.delete()
     except: pass
-    global auto_react_enabled, loop_manager_task, worker_task, is_cleaning
+    global auto_react_enabled, loop_manager_task, worker_task, bg_mining_task, is_cleaning
     if not auto_react_enabled: return
 
     auto_react_enabled = False
     is_cleaning = False
-    print("⛔ [DỪNG KHẨN CẤP] ĐANG KHAI TỬ TOÀN BỘ LUỒNG AUTO REACT VÀ WORKER...", flush=True)
+    print("⛔ [DỪNG KHẨN CẤP] ĐANG KHAI TỬ TOÀN BỘ LUỒNG AUTO REACT VÀ MINER...", flush=True)
     
     if loop_manager_task and not loop_manager_task.done(): loop_manager_task.cancel()
     if worker_task and not worker_task.done(): worker_task.cancel()
+    if bg_mining_task and not bg_mining_task.done(): bg_mining_task.cancel()
         
     loop_manager_task = None
     worker_task = None
+    bg_mining_task = None
 
     while not reaction_queue.empty():
         try: reaction_queue.get_nowait()
