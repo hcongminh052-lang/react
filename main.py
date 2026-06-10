@@ -167,7 +167,7 @@ async def reaction_worker():
         print("📥 [WORKER] Luồng xử lý hàng đợi thả react đã bị hủy hoàn toàn.", flush=True)
 
 # =====================================================================
-# 🧹 5. ĐÀO SÂU LIÊN TỤC VỀ QUÁ KHỨ (CÀY ĐẾN KHI CÓ BÀI MỚI THÔI)
+# 🧹 5. ĐÀO SÂU LIÊN TỤC VỀ QUÁ KHỨ (BẢN TĂNG TỐC SẢI BƯỚC VƯỢT VÙNG TRỐNG)
 # =====================================================================
 async def follow_old_logic():
     global is_cleaning, channel_checkpoints
@@ -176,7 +176,7 @@ async def follow_old_logic():
     is_cleaning = True
     print(f"🧹 [HỆ THỐNG] Tiến hành ĐÀO SÂU liên tục về bài cũ...", flush=True)
 
-    TARGET_PER_CHANNEL = 40   # Chỉ tiêu: Gom đủ 40 bài viết cần thả react cho mỗi kênh
+    TARGET_PER_CHANNEL = 40   # Chỉ tiêu gom bài mỗi kênh
     global_temp_list = []
 
     shuffled_channels = TARGET_CHANNELS.copy()
@@ -206,12 +206,12 @@ async def follow_old_logic():
             print(f"🔍 [QUÉT KÊNH] Bắt đầu đào sâu lịch sử kênh: {cid}...", flush=True)
             channel_gathered = 0
             
-            # Khởi tạo con trỏ tin nhắn cũ dựa trên checkpoint
             current_cursor_id = int(oldest_msg_id) if oldest_msg_id else None
+            consecutive_empty_chunks = 0  # Đếm số lần liên tiếp cào trúng cụm không có reaction
 
-            # 🔄 VÒNG LẶP ĐÀO SÂU VÔ HẠN: Ép bot cày sâu xuống mãi cho đến khi Gom Đủ Chỉ Tiêu hoặc Chạm Đáy Kênh
             while channel_gathered < TARGET_PER_CHANNEL and auto_react_enabled:
-                args = {"limit": 100} 
+                # TĂNG TỐC: Lấy tối đa 200 tin nhắn một lần thay vì 100 để nhảy cóc nhanh hơn qua vùng trống
+                args = {"limit": 500} 
                 if current_cursor_id:
                     args["before"] = discord.Object(id=current_cursor_id)
 
@@ -224,13 +224,11 @@ async def follow_old_logic():
                     failed_channels_pool[cid] = {"count": 1, "timeout": time.time() + 7200}
                     break 
 
-                # Nếu không còn tin nhắn cũ nào nữa -> Kênh chính thức cạn đáy
                 if not history_chunk: 
                     print(f"🎉 Kênh {cid} đã được đào tận gốc, không còn tin nhắn nào trong lịch sử!", flush=True)
                     channel_checkpoints[str(cid)] = {"last_id": "BOTTOM_REACHED"}
                     break
 
-                # Cập nhật con trỏ dịch sâu xuống tin nhắn cũ nhất vừa lấy được
                 current_cursor_id = history_chunk[-1].id
                 valid_count_in_chunk = 0
 
@@ -239,7 +237,6 @@ async def follow_old_logic():
                         my_reactions = [str(r.emoji) for r in msg.reactions if r.me]
                         missing_reactions = [r for r in msg.reactions if str(r.emoji) not in my_reactions]
                         
-                        # Nếu phát hiện bài viết có emoji mà mình chưa thả -> Gom bài!
                         if missing_reactions:
                             is_vip = msg.author.id in PRIORITY_USERS
                             global_temp_list.append((msg, is_vip))
@@ -251,18 +248,22 @@ async def follow_old_logic():
                                 
                 del history_chunk
                 
-                # Nếu nguyên một cụm 100 tin nhắn vừa quét không có bài nào để react, log ra để theo dõi tiến độ đào sâu
                 if valid_count_in_chunk == 0:
-                    print(f"   ↳ [ĐÀO SÂU] Kênh {cid} toàn bài đã thả. Đang bơi tiếp xuống dưới ID: {current_cursor_id}...", flush=True)
-                    await asyncio.sleep(0.2) # Nghỉ cực ngắn 0.2s để chống nghẽn nghẽn cổng API Discord
+                    consecutive_empty_chunks += 1
+                    # Cứ mỗi 5 cụm trống (khoảng 1000 tin nhắn không react), in log một lần để tránh làm rác log Railway
+                    if consecutive_empty_chunks % 5 == 0:
+                        print(f"   ↳ [XUYÊN THẤU] Kênh {cid} đã vượt qua {consecutive_empty_chunks * 200} bài không có reaction. Hiện tại tới ID: {current_cursor_id}...", flush=True)
+                    
+                    # Giãn cách 0.4s để tránh bị dính Rate Limit ngầm từ Discord khi bơi quá nhanh
+                    await asyncio.sleep(0.4) 
+                else:
+                    consecutive_empty_chunks = 0  # Reset nếu tìm thấy bài có reaction
 
-            # Lưu lại vị trí sâu nhất đã đào được của kênh này
             if current_cursor_id and auto_react_enabled and channel_checkpoints.get(str(cid), {}).get("last_id") != "BOTTOM_REACHED":
                 channel_checkpoints[str(cid)] = {"last_id": str(current_cursor_id)}
 
         await save_all_data()
 
-        # === NẠP BÀI VÀO HÀNG ĐỢI WORKER ===
         if global_temp_list and auto_react_enabled:
             priority_list = [item[0] for item in global_temp_list if item[1] is True]
             normal_list = [item[0] for item in global_temp_list if item[1] is False]
@@ -285,7 +286,7 @@ async def follow_old_logic():
         print(f"🚨 [LỖI HỆ THỐNG] Lỗi nghiêm trọng: {critical_error}", flush=True)
     finally:
         is_cleaning = False
-
+        
 # =====================================================================
 # 🔄 6. BỘ QUẢN LÝ VÒNG LẶP TUẦN TỰ
 # =====================================================================
